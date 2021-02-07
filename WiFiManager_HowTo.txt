@@ -1,0 +1,5 @@
+1. ESP start in Station mode + connectiepoging met vorige Access Points
+2. Als dat niet lukt ESP start in Access Point mode
+3. Connecteer met AccessPoint "GC_P", paswoord "gistcontroller"
+4. 192.168.4.1 en configureer connectie (= kies AP en geef paswoord)
+5. ESP herstart 
