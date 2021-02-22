@@ -1,17 +1,15 @@
 /*
- * TODO: starten zonder internet !!!
- * 
  * GIP Jobbe Geybels 2020-2021
- * Gistcontroller v6.x op een NODEMCU-board (ESP8266) 
- *    P-Controle: Simple Proportionele Controle
+ * Gistcontroller v6.x op een NODEMCU-board (ESP8266)
+ *    P-Controle: Simpele Proportionele Controle
  * 
- * WifiSetup      via WiFiManager (IPscherm+select=reconnect)
+ * WifiSetup      via WiFiManager (On Demand via IPscherm+select)
  * I2C-ADXL345    Gyroscoop
  * I2C-LCD        LCD
  * RotaryEncoder  Druk- en draai-knop
  * DS18B20        Tempsensor: Wort/Frigo
- *    Wort  Sensor 2 : 0x28, 0x76, 0xCD, 0xF0, 0x3A, 0x19, 0x01, 0x3F
  *    Frigo Sensor 1 : 0x28, 0xAA, 0xD0, 0x6D, 0x59, 0x14, 0x01, 0xA2
+ *    Wort  Sensor 2 : 0x28, 0x76, 0xCD, 0xF0, 0x3A, 0x19, 0x01, 0x3F
  * Relays         Cooling - Heating
  * ESP8266        Email naar gist.controller@gmail.com
  * EEPROM         Bewaar settings (herstart): aanpassen via EEPROM_VER of menu
@@ -22,9 +20,10 @@
 #include <ErriezRotaryFullStep.h>          // Encoder library
 #include <Adafruit_ADXL345_U.h>            // Library ADXL345
 #include <Adafruit_Sensor.h>               // Library ADXL345
-#include <DallasTemperature.h>             // Libraryvoor DS18B20
+#include <DallasTemperature.h>             // Library voor DS18B20
 #include <OneWire.h>                       // Library voor DS18B20
 #include <ESP8266WiFi.h>                   // Library voor wifi
+#include <ESP8266WebServer.h>              // WebServer
 #include <WiFiManager.h>                   // Library voor WifiManager
 #include <EEPROM.h>                        // Library EEPROM: bewaar parameters
 #include <ESPDateTime.h>                   // Datum en tijd
@@ -38,11 +37,11 @@ Adafruit_ADXL345_Unified tilter = Adafruit_ADXL345_Unified(12345);
 OneWire oneWire(TEMP_PIN);
 DallasTemperature sensors(&oneWire);
 WiFiManager wifiManager;
+ESP8266WebServer server(80);
 
 void setup(void) { 
   // Initialseer LCD,Serieel en Serieel-message
   lcd_serial_msg_Init();
-
   // Initialiseer componenten
   initSuccess = initComponents();
   if (!initSuccess.isEmpty()) {
@@ -52,42 +51,29 @@ void setup(void) {
       lcdShowInit(initSuccess,3,0);
     }
   }
-  
   // Initialiseer wortTemp/max-minWortTemp
   getTemperature();
   maxWortTemp = minWortTemp = wortTemp;
-  if ( send_msg ) {sendInitMessage();}
+  if ( send_msg ) sendInitMessage();
+
+  // Toon hoofdscherm
+  currentLCDState == DISPLAY_SUMMARY;
+  displayState();
 }
 
 void loop(void) {
-  updateTemperature();                      // Haal de huidige temperatuur op
-  controlState();                           // Update status: koel,inactief,verwarm
-  updateTilted();                           // Controleer tiltsensor... elke sec=oké
-
-  controlDisplayState();
-  displayState();                           // update de LCDdisplay
-
-  if (send_msg) {sendMessage();}            // Zend bericht als tijd verstreken 
+  updateTemperature();                            // Ophalen temperatuur en bereken targetTempF
+  if ( WiFiConnected() ) server.handleClient();   // Webserver
+  controlState();                                 // Update status: koel,inactief,verwarm
+  updateTilted();                                 // Controleer tiltsensor
+  controlDisplayState();                          // Beheer LCD (display, backlight, button, ...)
+  if ( send_msg  ) {sendMessage();}               // Zend bericht als tijd verstreken 
 }
 
 /**
  * Haal de huidige temperatuur op en update MAX- en MIN-Temp
  */
 void updateTemperature() {
-  /*
-  * targetTempF  targetTempW   Kp  wortTemp
-  * 28,5         21,00         5   19,50
-  * 26           21,00         5   20,00
-  * 23,5         21,00         5   20,50
-  * 21           21,00         5   21,00
-  * 18,5         21,00         5   21,50
-  * 16           21,00         5   22,00
-  * 13,5         21,00         5   22,50
-  * 11           21,00         5   23,00
-  * 8,5          21,00         5   23,50
-  * -4           21,00         5   26,00
-  * -24          21,00         5   30,00
-  */
   getTemperature();
   // automodus terug aanzetten als worttemp bereikt!
   if ( forced && wortTemp == targetTempW ) {
@@ -156,17 +142,16 @@ void controlState() {
       }
     }
   }
+  // Manuele status
+  if (forced) return;
 
-  // Momenteel niet in automatische status
-  if (forced) {
-      return;
-  }
- 
+  // Automatische status
   switch ( currentControllerState ) {
     // Momenteel aan het KOELEN
     case STATE_COOLING:
-      runTime = (unsigned long)(millis() - millisStateStart) / 1000;  // runtime in seconds
-      // ensure minimum compressor runtime
+      // bereken runtime in seconden = hoelang is frigo al bezig?
+      runTime = (unsigned long)(millis() - millisStateStart) / 1000;
+      // Compressor moet minstens een bepaalde tijd draaien voor hij af mag
       if (runTime < coolMinOn) break;
       if (frigoTemp < targetTempF) {
         if (debug_msgcsv) {serialMsgCsv("StartInactief");}
@@ -268,183 +253,176 @@ void getTilt() {
 }
 
 /*
- * Stuur het bericht met tilt- en statusinfo als tijd om is 
+ * Berichten: BASIS - INIT - STATUS - ALERT
  */
 void sendMessage() {
   currentMillis = millis();
-  if ( millisMessage > 0 && currentMillis - millisElapsedMessages > millisMessage) {
-    if (WiFiConnected()) {
+  if ( WiFiConnected() && millisMessage > 0 && currentMillis - millisElapsedMessages > millisMessage) {
       millisElapsedMessages = currentMillis;
-      String subject      = "Gist Controller " + versie + " Doel:" + targetTempW + "°C";
-      String message      = "";
-      message = fillMessage();
+      String subject      = subjectMsg("BASIS");
+      String message      = fillMessage();
       mailSend = sendMail(subject,message);
       if ( mailSend ) {
              countTilts = 0;
              countStatHeat = 0;
              countStatCool = 0;
       }
-    }
   }
 }
-/*
- * Stuur initieel bericht
- */
 void sendInitMessage() {
   if (WiFiConnected()) {
-    lcdShowInit("Sending InitMsg",2,0); 
-    
-    String subject      = "Init Gist Controller " + versie + " Doel:" + targetTempW + "°C";
-    String message      = "";
-    message = fillAlertMessage();
+    lcdShowInit("Sending InitMsg",2,0);     
+    String subject      = subjectMsg("INIT");
+    String message      = fillAlertMessage();
     mailSend = sendMail(subject,message);
     }
 }
-/*
- * Stuur bericht bij statuswissel
- */
 void sendStateMessage() {
   if (WiFiConnected()) {
-    String subject      = "Status Gist Controller " + versie + " Doel:" + targetTempW + "°C";
-    String message      = "";
-    message = fillStateMessage();
+    String subject      = subjectMsg("STATUS");
+    String message      =  fillStateMessage();
     mailSend = sendMail(subject,message);
     }
 }
-/*
- * Stuur een Alertmessage
- */
 void sendAlertMessage() {
   --alertMaxTimer;
   if ( alertMaxTimer < 1) {
     if (WiFiConnected()) {
       alertMaxTimer=alertCountDown;
-      String subject      = "ALERT Gist Controller " + versie + " Doel:" + targetTempW + "°C";
-      String message      = "";
-      message = fillAlertMessage();
+      String subject      = subjectMsg("ALERT");
+      String message      = fillAlertMessage();
       mailSend = sendMail(subject,message);
       }
   }
 }
+String subjectMsg(String mType) {
+  mType = mType + " Gist Controller " + versie + " Doel:" + targetTempW + "°C";
+  return mType;
+}
 
 ICACHE_RAM_ATTR void potTurned() {
+  // enkel actie als backlight actief
+  if (!isBacklightActive) return;
+
   // reset de tijd in deze LCD-status
-  // anders bestaat de kans dat je naar hoofdscherm springt tijdens duwen
+  // anders bestaat de kans dat je naar hoofdscherm springt tijdens draaien
   millisLCDStart = millis();
   backlightStart = millis();
-  whichButtonPressed=BUTTON_NONE;
-  if (!isBacklightActive) {
-    return;
-  }
+  buttonAction=BUTTON_NONE;
   
   int bturn;
-  // Read rotary state (Counter clockwise) -2, -1, 0, 1, 2 (Clockwise)
   bturn = rotary.read();
-
-  // Count up or down by using rotary speed
-  if (bturn == 0) {
-      return;
-  } else if (abs(bturn) >= 2) {
-      if (buttonPushed) {
-        whichButtonPressed=BUTTON_UP;
-        handleUpDown( whichButtonPressed, millis() );
-      } else {  
+  // geen beweging
+  if ( bturn == 0 ) return;
+  // Links/Rechts afhankelijk van rotary-snelheid (abs= absolute (=positieve) waarde)
+  if ( abs(bturn) >= 2 ) {
+    if (buttonPushed) {             // werd er op een knop geduwd waar dat mocht
+        buttonAction=BUTTON_UP;
+        handleUpDown( buttonAction, millis() );
+        return;
+      } else {  // geen push = ga terug in het menu
         currentLCDState += bturn * 2;
       }
   } else {
-      if (buttonPushed) {
-        whichButtonPressed=BUTTON_DOWN;
-        handleUpDown( whichButtonPressed, millis() );
-      } else {  
+      if (buttonPushed) {           // werd er op een knop geduwd waar dat mocht
+        buttonAction=BUTTON_DOWN;
+        handleUpDown( buttonAction, millis() );
+        return;
+      } else {  // geen push = ga verder in menu
         currentLCDState += bturn;
       }
   }
-  // test of je niet te ver gaat tov NO_OF_LCD_STATES (momenteel 0 tem 8)
+  // test of je niet te ver gaat tov NO_OF_LCD_STATES
   currentLCDState += NO_OF_LCD_STATES;
   currentLCDState %= NO_OF_LCD_STATES;
+  displayState();
 }
 
 ICACHE_RAM_ATTR void potPushed() {
+  int bpush = digitalRead(RO_PUSH);
+  if (bpush != 0) return;             // geen Button push
+  
   // reset de tijd in deze LCD-status
   // anders bestaat de kans dat je naar hoofdscherm springt tijdens duwen
   millisLCDStart = millis();
   backlightStart = millis();
-  whichButtonPressed=BUTTON_NONE;
-  int bpush = digitalRead(RO_PUSH);
   
-  // Poll Rotary button pin
-  if (bpush == 0) {
-      if ( !isBacklightActive ) {
-        buttonPushed = false;
-        enableBacklight(millis());
-      }
-      else if ( ( currentLCDState == DISPLAY_IP ) && ( send_msg ) ) {
-                  wifiSuccess=WiFiConnect();
-      }
-      else if ( ( currentLCDState == DISPLAY_RESET_EEPROM) ) {
-                  EEPROMWritePresets();
-                  EEPROMReadSettings();
-                  if ( send_msg ) {sendInitMessage();}
-                  currentLCDState = DISPLAY_SUMMARY;
-                  displayState();
-      }
-      else if ( ( currentLCDState == DISPLAY_FORCE_ALLOUT) ) {
-                  // terug naar automatisch COOL/HEAT
-                  digitalWrite(HEATING_PIN, LOW);
-                  digitalWrite(COOLING_PIN, LOW);    
-                  currentControllerState = STATE_INACTIVE;
-                  millisStateStart = millis();
-                  forced=false;
-                  currentLCDState = DISPLAY_SUMMARY;
-                  displayState();
-      } 
-      else if ( ( currentLCDState == DISPLAY_FORCE_HEAT) ) {
-                  // HEAT aan
-                  digitalWrite(COOLING_PIN, LOW);
-                  digitalWrite(HEATING_PIN, HIGH);
-                  currentControllerState = STATE_HEATING;
-                  millisStateStart = millis();
-                  currentLCDState = DISPLAY_SUMMARY;
-                  displayState();
-                  forced=true;
-      } 
-      else if ( ( currentLCDState == DISPLAY_FORCE_COOL) ) {
-                  // COOL aan
-                  digitalWrite(HEATING_PIN, LOW);
-                  digitalWrite(COOLING_PIN, HIGH);
-                  currentControllerState = STATE_COOLING;
-                  millisStateStart = millis();
-                  currentLCDState = DISPLAY_SUMMARY;
-                  displayState();
-                  forced=true;
-      } 
-      else if ( ( currentLCDState == DISPLAY_RESET_NODEMCU) ) {
-                  ESP.restart();
-      } 
-      else if ( ( currentLCDState == DISPLAY_SET_MSG_TIME ) ||  
-                ( currentLCDState == DISPLAY_SET_TARGET ) ) {
-                  if ( buttonPushed ) {
-                    buttonPushed = false;
-                    EEPROMWriteSettings();
-                  } else {
-                    buttonPushed = true;
-                 }
-      }
+  if ( !isBacklightActive ) {       // zet backlight terug aan
+    buttonPushed = false;
+    enableBacklight(millis());
+    return;
   }
+
+  // push voor aanpassing msg_time, target
+  if ( currentLCDState == DISPLAY_SET_MSG_TIME ) {
+      if ( buttonPushed ) EEPROMWriteSettings();
+      buttonPushed = !buttonPushed;
+      displaysetmsgtimeData();
+      return;
+  }
+  else if ( currentLCDState == DISPLAY_SET_TARGET) {
+      if ( buttonPushed ) EEPROMWriteSettings();
+      buttonPushed = !buttonPushed;
+      displaytargetTempWData();
+      return;
+  }
+
+  switch (currentLCDState) {
+      case DISPLAY_RESET_WIFI:                 // connect Wifi
+        wifiSuccess=WiFiConnect();
+        break;
+      case DISPLAY_RESET_EEPROM:              // reset EEPROM
+        EEPROMWritePresets();
+        EEPROMReadSettings();
+        if ( send_msg ) sendInitMessage();
+        break;
+      case DISPLAY_RESET_NODEMCU:           // reset Nodemcu
+        ESP.restart();
+        break;
+      case DISPLAY_STATUS_AUTO:              // terug naar automatisch COOL/HEAT
+        digitalWrite(HEATING_PIN, LOW);
+        digitalWrite(COOLING_PIN, LOW);    
+        currentControllerState = STATE_INACTIVE;
+        millisStateStart = millis();
+        forced=false;
+        break;
+      case DISPLAY_STATUS_HEAT:                // HEAT aan tot weer uitgezet of tempwort = gewenst
+        digitalWrite(COOLING_PIN, LOW);
+        digitalWrite(HEATING_PIN, HIGH);
+        currentControllerState = STATE_HEATING;
+        millisStateStart = millis();
+        forced=true;
+        break;
+      case DISPLAY_STATUS_COOL:                // COOL aan tot weer uitgezet of tempwort = gewenst
+        digitalWrite(HEATING_PIN, LOW);
+        digitalWrite(COOLING_PIN, HIGH);
+        currentControllerState = STATE_COOLING;
+        millisStateStart = millis();
+        forced=true;
+        break;
+    }    
 }
 
 /**
  * Gebruik knoppen, LCD-displaymodus aanpassen en LCD verversen
  */
 void controlDisplayState() {
+  if (!isBacklightActive) return;
+  
   currentMillis = millis();
   millisInLCDState = currentMillis - millisLCDStart;
   
   // Zet LCD uit na verstrijken timeout (REDIRECT_TIMEOUT * 5)
   checkBacklightTimeout(currentMillis);
+
+  // Als hoofdscherm actief update dan de waardes
+  if ( currentLCDState == DISPLAY_SUMMARY ) {
+    displaySummaryData();
+    return;
+  }
   
   // Geen knop gedrukt EN momenteel niet in SUMMARY-status 
-  if ( !whichButtonPressed && currentLCDState != DISPLAY_SUMMARY) {
+  if ( !buttonAction && currentLCDState != DISPLAY_SUMMARY) {
     // Indien je te lang in huidige LCD-status zit = Terug naar SUMMARY-status
     if ( millisInLCDState >= REDIRECT_TIMEOUT ) {
       millisLCDStart = currentMillis;
@@ -461,8 +439,7 @@ void controlDisplayState() {
  */
 void checkBacklightTimeout(int mtime) {
   backlightTimeout = currentMillis - backlightStart;
-  if (   isBacklightActive 
-      && (backlightTimeout) > (REDIRECT_TIMEOUT * 5) ) {
+  if ( isBacklightActive && backlightTimeout > (REDIRECT_TIMEOUT * 5) ) {
     disableBacklight(mtime);
   }
 }
@@ -470,7 +447,6 @@ void checkBacklightTimeout(int mtime) {
  * disable LCDscherm
  */
 void disableBacklight(int mtime) {
-  currentLCDState = DISPLAY_SUMMARY;
   lcd.noBacklight();
   lcd.noDisplay();
   isBacklightActive = false;
@@ -481,46 +457,44 @@ void disableBacklight(int mtime) {
 void enableBacklight(int mtime) {
   lcd.display();
   lcd.backlight();
+  currentLCDState = DISPLAY_SUMMARY;
   isBacklightActive = true;
   backlightStart = mtime;
+  millisLCDStart = mtime;
 }
 
 /**
  * Knop = UP/DOWN = Wijzig parameters, afhankelijk van de huidige LCD-status
  */
-void handleUpDown( int whichButtonPressed, int mtime ) {
+void handleUpDown( int buttonAction, int mtime ) {
    // reset de tijd in deze LCD-status
    // anders bestaat de kans dat je naar hoofdscherm springt tijdens duwen
    millisLCDStart = mtime;
+   backlightStart = mtime;
 
    switch ( currentLCDState ) {
-    case DISPLAY_SET_MSG_TIME:
-      // Verhoog/verlaag de tijd tussen boodschappen
-      if ( whichButtonPressed == BUTTON_UP ) {
-        //BETWEEN_MSG_INCR = in minuten = 1000 * 60 * BETWEEN_MSG_INCR
-        millisMessage += BETWEEN_MSG_INCR*60000; 
+    case DISPLAY_SET_MSG_TIME:            // Verhoog/verlaag de tijd tussen boodschappen                                          
+      switch ( buttonAction ) {           // BETWEEN_MSG_INCR = in minuten *60000 = millis
+        case BUTTON_UP:
+          millisMessage += BETWEEN_MSG_INCR*60000;
+          break;
+        default:
+          millisMessage -= BETWEEN_MSG_INCR*60000;
+          break; 
       }
-      else if ( whichButtonPressed == BUTTON_DOWN ) {
-        millisMessage -= BETWEEN_MSG_INCR*60000; 
-        if ( millisMessage < 0 ) {
-          millisMessage = 0;
-        }
-      }
+      if ( millisMessage < 0 ) millisMessage = 0;
+      displaysetmsgtimeData();
       break;  
-    case DISPLAY_SET_TARGET:
-      // Verhoog/verlaag de gewenste temperatuur
-      if ( whichButtonPressed == BUTTON_UP ) {
-        // mag niet hoger gezet worden dan MAXIMUM_TARGET
-        if ( targetTempW < MAXIMUM_TARGET ) {
-          targetTempW += TEMP_INCR; 
-        }
+    case DISPLAY_SET_TARGET:              // Verhoog/verlaag de gewenste temperatuur
+      switch ( buttonAction ) {
+        case BUTTON_UP:
+          if ( targetTempW < MAXIMUM_TARGET ) targetTempW += TEMP_INCR;
+          break;
+        default:
+          if ( targetTempW > MINIMUM_TARGET ) targetTempW -= TEMP_INCR; 
+          break; 
       }
-      else if ( whichButtonPressed == BUTTON_DOWN ) {
-        // mag niet lager gezet worden dan MINIMUM_TARGET
-        if ( targetTempW > MINIMUM_TARGET ) {
-        targetTempW -= TEMP_INCR; 
-        }
-      }
+      displaytargetTempWData();
       break;
   }
 }
@@ -528,47 +502,50 @@ void handleUpDown( int whichButtonPressed, int mtime ) {
 String initComponents() {
   // initialiseer pins
 
-  // Enable internal pull-up for the rotary button pin
-  pinMode(RO_PUSH, INPUT_PULLUP);
-  // Initialize pin change interrupt on both rotary encoder pins
+  pinMode(RO_PUSH, INPUT_PULLUP);         // rotary pushbutton
   attachInterrupt(digitalPinToInterrupt(RO_LEFT), potTurned, CHANGE);
   attachInterrupt(digitalPinToInterrupt(RO_RIGHT), potTurned, CHANGE);
   attachInterrupt(digitalPinToInterrupt(RO_PUSH), potPushed, CHANGE);
   
-  pinMode( COOLING_PIN, OUTPUT);           // output naar led/220V
-  pinMode( HEATING_PIN, OUTPUT );          // output naar led/220V
+  pinMode( COOLING_PIN, OUTPUT);           // koelen
+  pinMode( HEATING_PIN, OUTPUT );          // verwarmen
   digitalWrite( COOLING_PIN, LOW );        // initieel inactief zetten
   digitalWrite( HEATING_PIN, LOW );        // initieel inactief zetten
-  sensors.begin();                         // Start the DS18B20 sensor
+  sensors.begin();                         // Start the DS18B20 sensors
 
   lcd.setCursor(0,1);
   lcd.print(F("Initialisatie:"));
 
   // Initialiseer wifi als send_msg = true
-  if ( send_msg ) {
-    wifiSuccess=WiFiConnect();
-    if(!wifiSuccess) {return "Wifi";}
-  } 
+  wifiSuccess=WiFiConnect();
+  if(!wifiSuccess) {return "Wifi";}
+  // Webserver standaard routines
+  server.on("/", handle_OnConnect);
+  server.onNotFound(handle_NotFound);
+  server.begin();
 
-  // test DS18B20
+  // test DS18B20 Wort
   lcdShowInit("DS18B20 - Wort",2,0);
   getTemperature();
   if (wortTemp == -127) {
      lcdShowInit("Error",3,0);
      return "DS18B20 Wort";
   } else {lcdShowInit("gelukt",3,0);}
+  
+  // test DS18B20 Frigo
   lcdShowInit("DS18B20 - Frigo",2,0);
   if (frigoTemp == -127) {
      lcdShowInit("Error",3,0);
      return "DS18B20 Frigo";
   } else {lcdShowInit("gelukt",3,0);}
+  
   // initialiseer gyro...
   lcdShowInit("ADXL345",2,0); 
   if(!tilter.begin()) {
     lcdShowInit("Error",3,0);
     return "ADXL345";
   } else {lcdShowInit("gelukt",3,0);}
-  tilter.setRange(ADXL345_RANGE_4_G);        // initialiseer ADXL345
+  tilter.setRange(ADXL345_RANGE_4_G);
   
   // Ophalen DateTime
   lcdShowInit("DateTime",2,0);
@@ -579,27 +556,25 @@ String initComponents() {
   } else {
     lcdShowInit("gelukt",3,0);
   }
-
+  
   // Bewaar het startpunt
   startDateInt = DateTime.now();
   backlightStart = millis();
   millisElapsedMessages = millis();
-
+  
   //EEPROM bewaren/ophalen waardes
   byte ver;
   lcdShowInit("EEPROM",2,0);
   EEPROM.begin(512);
   delay(1500);
-  EEPROM.get(0, ver);  // eerste byte EEPROM = versienummer
-
-  // EEPROM versienummer verschillend van EEPROM_VER
-  if (ver != EEPROM_VER) {
-    // Als versienummer niet goed = schrijf defaults
+  // haal eerste byte op = bevat versienummer EEPROM_VER
+  EEPROM.get(0, ver);
+  if ( ver != EEPROM_VER ) {
+    // Als versienummer niet= EEPROM_VER = schrijf defaults
     EEPROMWritePresets();
     lcdShowInit("Reset",3,0);
     delay(1000);
   }
-  // Haal waardes op uit EEPROM
   lcdShowInit("Loaded",3,0);
   EEPROMReadSettings();
 
@@ -614,27 +589,24 @@ boolean WiFiConnect() {
   if ( wm_reset ) {wifiManager.resetSettings();}
   //wifiManager.setDebugOutput(false);
   wifiManager.setMinimumSignalQuality(wm_quality);
-  //Eerste parameter = naam accesspoint
-  //Tweede parameter = paswoord
+  //Parameter1 = naam accesspoint  Parameter2 = paswoord
   wifiSuccess=wifiManager.autoConnect("GistController", "gistcontroller");
-  if(!wifiSuccess) {
-      ESP.restart();
-  } else {
+  if(!wifiSuccess) {ESP.restart();}
+  else {  
     lcdShowInit(WiFi.localIP().toString().c_str(),3,0);
+    current_SSID = WiFi.SSID();
     delay(2000);
     return true;
   } 
 }
-
+          
 /*
  * WiFi nog connectie
  */
 boolean WiFiConnected() {
   boolean state       = true;
-
-  if (WiFi.status() != WL_CONNECTED) {state = false;}
-  if (WiFi.localIP().toString() == "0.0.0.0") {state = false;}
-
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.localIP().toString() == "0.0.0.0") return false;
   return state;
 }
 
@@ -645,12 +617,11 @@ boolean sendMail(String subject, String message) {
   boolean state       = true;
   String error_msg    = "";
   
-  Gsender *gsender = Gsender::Instance();    // Getting pointer to class instance
-  if(gsender->Subject(subject)->Send("gist.controller@gmail.com", message)) {
+  Gsender *gsender = Gsender::Instance();
+  if ( gsender->Subject(subject)->Send("gist.controller@gmail.com", message) ) {
     state = true;
   }
-  else 
-  {
+  else {
     error_msg = gsender->getError(); 
     state = false;
   }
@@ -679,7 +650,7 @@ boolean setupDateTime(int loops) {
 }
 
 /*
- * Initialiseer LCD 
+ * Initialiseer LCD/Serieel
  */
 void lcd_serial_msg_Init() {
   lcd.init();
@@ -687,43 +658,50 @@ void lcd_serial_msg_Init() {
   lcd.setCursor(0,0);
   lcd.print(F("Gist Controller"));
   lcd.setCursor(17,0);
-  lcd.print(versie);
-  
+  lcd.print(versie);  
   if ( debug || debug_tilt || debug_wifi || debug_buttons || debug_msgcsv) {
       Serial.begin(lcdBaud);
       Serial.println(F("Initialisatie Gist-controller"));
   }
   delay(1000);
-
   if (debug_msgcsv) {
-    Serial.print(F("startpunt;meetpunt;currentstatus;tijdinstatus;newstatus;"));
+    Serial.print(F("runningtime;currentstatus;tijdinstatus;newstatus;"));
     Serial.print(F("doelwort;doelfrigo;worttemp;frigotemp;coolingsinframe;"));
     Serial.println(F("heatingsinframe;tiltsinframe;tijdtussentilts"));
-    //targetTempF=constrain(targetTempW-Kp*(wortTemp-targetTempW),targetTempW-TEMP_DANGER,targetTempW+TEMP_DANGER);
   }
-  
 }
 
 /*
- * LCD: display boodschap 'initmsg' op lijn 2 positie 'pos' 
+ * LCD: display boodschap 'initmsg' op lijn 'row' positie 'pos' 
  */
 void lcdShowInit(String initmsg, int row, int pos) {
+  // maak eerst de volledige lijn 'row' leeg
   for(int r = row; r < 4; r++) {
     lcd.setCursor(0,r);
     for(int n = 0; n < 20; n++) {lcd.print(F(" "));}
     }
-  lcd.setCursor(pos,row);
-  lcd.print(initmsg);
-  delay(1000);
+  if ( initmsg != "" ) {
+    lcd.setCursor(pos,row);
+    lcd.print(initmsg);
+    delay(500);
+  }
 }
 
 /**
  * In welke LCD-status zitten we nu en toon die LCD-status
  */
-void displayState()  {
+void displayState() {
+  if (!isBacklightActive) return;
+  
   switch ( currentLCDState ) {
     case DISPLAY_SUMMARY:
       displaySummary();
+      break;
+    case DISPLAY_IP:
+      displayIP();
+      break;
+    case DISPLAY_STATUS_MAX:
+      displayStatusmax();
       break;
     case DISPLAY_TEMP_HISTORY:
       displayHistory();
@@ -731,29 +709,26 @@ void displayState()  {
     case DISPLAY_SET_MSG_TIME:
       displaysetmsgtime();
       break;
-    case DISPLAY_STATUS_MAX:
-      displayStatusmax();
-      break;
     case DISPLAY_SET_TARGET:
       displaytargetTempW();
       break;
-    case DISPLAY_IP:
-      displayIP();
-      break;
-    case DISPLAY_FORCE_ALLOUT:
-      displayforceallout();
-      break;
-    case DISPLAY_FORCE_HEAT:
-      displayforceheat();
-      break;
-    case DISPLAY_FORCE_COOL:
-      displayforcecool();
+    case DISPLAY_RESET_WIFI:
+      displayreset_WIFI();
       break;
     case DISPLAY_RESET_EEPROM:
-      displayEEPROM();
+      displayreset_EEPROM();
       break;
     case DISPLAY_RESET_NODEMCU:
-      displayRESET();
+      displayreset_NODEMCU();
+      break;
+    case DISPLAY_STATUS_AUTO:
+      displaystatus_auto();
+      break;
+    case DISPLAY_STATUS_HEAT:
+      displaystatus_heat();
+      break;
+    case DISPLAY_STATUS_COOL:
+      displaystatus_cool();
       break;
     default:
       // Opvangen fout in schermdefinities
@@ -768,14 +743,12 @@ void displayState()  {
 }
 
 /**
- * summary display
+ * DISPLAY-schermen
  */ 
 void displaySummary() {
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print(F("Temp Wort"));
-  lcd.setCursor(11,0);
-  lcd.print(wortTemp);
   lcd.setCursor(16,0);
   lcd.print((char)223);
   lcd.setCursor(17,0);
@@ -783,8 +756,6 @@ void displaySummary() {
 
   lcd.setCursor(0,1);
   lcd.print(F("Temp Frigo"));
-  lcd.setCursor(11,1);
-  lcd.print(frigoTemp);
   lcd.setCursor(16,1);
   lcd.print((char)223);
   lcd.setCursor(17,1);
@@ -796,9 +767,20 @@ void displaySummary() {
   lcd.print((char)223);
   lcd.setCursor(17,2);
   lcd.print(F("C"));
+}
+void displaySummaryData() {
+  lcd.setCursor(11,0);
+  lcd.print(wortTemp);
+
+  lcd.setCursor(11,1);
+  lcd.print(frigoTemp);
+  
   lcd.setCursor(11,2);
   lcd.print(targetTempW);
 
+  lcd.setCursor(2,3);
+  if (wifiSuccess) {lcd.print(F("W"));}
+  else {lcd.print(F(" "));}
   lcd.setCursor(3,3);
   if (forced) {lcd.print(F("M"));}
   else {lcd.print(F("A"));}
@@ -818,10 +800,6 @@ void displaySummary() {
   lcd.setCursor(7,3);
   lcd.print(showTime(millisInControllerState/1000,false));
 }
-
-/**
- * display temp history MIN
- */ 
 void displayHistory() {
   lcd.clear();
   lcd.setCursor(0,0);
@@ -835,27 +813,6 @@ void displayHistory() {
   lcd.setCursor(6,2);
   lcd.print(maxWortTemp);
 }
-
-/**
- * display msg-time 
- */ 
-void displaysetmsgtime() {
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print(F("Boodschap tijd: "));
-  lcd.setCursor(0,1);
-  lcd.print(millisMessage/60000);
-  lcd.setCursor(7,1);
-  lcd.print(F("[up/down]"));
-  if ( buttonPushed ) {
-    lcd.setCursor(18,1);
-    lcd.print(F("<>"));
-  }
-}
-
-/**
- * display status max
- */ 
 void displayStatusmax() {
   lcd.clear();
   lcd.setCursor(0,0);
@@ -869,9 +826,17 @@ void displayStatusmax() {
   lcd.setCursor(8,2);
   lcd.print(showTime(maxTimeHeating/1000,false));
 }
-/**
- * display target temp
- */ 
+void displayIP() {
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(F("IP"));
+  lcd.setCursor(0,1);
+  lcd.print(WiFi.localIP().toString().c_str());
+}
+
+/* 
+ *  SET-schermen targetTemp, msgtime
+ */
 void displaytargetTempW() {
   lcd.clear();
   lcd.setCursor(0,0);
@@ -880,38 +845,55 @@ void displaytargetTempW() {
   lcd.print(targetTempW);
   lcd.setCursor(7,1);
   lcd.print(F("[up/down]"));
+  lcd.setCursor(18,1);
+  lcd.print(F("  "));
+}
+void displaytargetTempWData() {
+  lcd.setCursor(0,1);
+  lcd.print(targetTempW);
   if ( buttonPushed ) {
     lcd.setCursor(18,1);
     lcd.print(F("<>"));
-  }
+  } else {lcd.print(F("  "));}
 }
-
-/**
- * display IP
- */
-void displayIP() {
+void displaysetmsgtime() {
   lcd.clear();
   lcd.setCursor(0,0);
-  lcd.print(F("IP:"));
+  lcd.print(F("Boodschap tijd: "));
   lcd.setCursor(0,1);
-  lcd.print(WiFi.localIP().toString().c_str());
+  lcd.print(millisMessage/60000);
+  lcd.setCursor(7,1);
+  lcd.print(F("[up/down]"));
+  lcd.setCursor(18,1);
+  lcd.print(F("  "));
+}
+void displaysetmsgtimeData() {
+  lcd.setCursor(0,1);
+  lcd.print(millisMessage/60000);
+  if ( buttonPushed ) {
+    lcd.setCursor(18,1);
+    lcd.print(F("<>"));
+  } else {lcd.print(F("  "));}
 }
 
 /**
- * display EEPROM: reset on push
+ * RESET-schermen
  */
-void displayEEPROM() {
+void displayreset_WIFI() {
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(F("Reset WiFi?"));
+  lcd.setCursor(0,1);
+  lcd.print(F("Bevestig met push."));
+}
+void displayreset_EEPROM() {
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print(F("Reset EEPROM?"));
   lcd.setCursor(0,1);
   lcd.print(F("Bevestig met push."));
 }
-
-/**
- * display RESET: reset NODEMCU
- */
-void displayRESET() {
+void displayreset_NODEMCU() {
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print(F("Reset NodeMCU?"));
@@ -920,31 +902,23 @@ void displayRESET() {
 }
 
 /**
- * COOL/HEAT automatisch
+ * Status Automatisch/COOL/HEAT
  */
-void displayforceallout() {
+void displaystatus_auto() {
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print(F("Temp automatisch?"));
   lcd.setCursor(0,1);
   lcd.print(F("Bevestig met push."));
 }
-
-/**
- * HEAT
- */
-void displayforceheat() {
+void displaystatus_heat() {
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print(F("Verwarmen?"));
   lcd.setCursor(0,1);
   lcd.print(F("Bevestig met push."));
 }
-
-/**
- * COOL
- */
-void displayforcecool() {
+void displaystatus_cool() {
   lcd.clear();
   lcd.setCursor(0,0);
   lcd.print(F("Koelen?"));
@@ -967,9 +941,7 @@ String showTime(int val,bool showDays){
   hours   = numberOfHours(val);
   minutes = numberOfMinutes(val);
   seconds = numberOfSeconds(val);
-  if (showDays) {
-    result  = String(zeroPad(days)) + " ";
-  }
+  if (showDays) result  = String(zeroPad(days)) + "d ";
   result  = result + String(zeroPad(hours));
   result  = result + ":" + String(zeroPad(minutes));
   result  = result + ":" + String(zeroPad(seconds));
@@ -979,9 +951,7 @@ String showTime(int val,bool showDays){
 // Verfraai getallen = voeg 0 toe als cijfer 1 positie is
 String zeroPad( int value ) {
   String valueString = String(value);
-  if (value < 10) {
-    valueString = String("0") + valueString;
-  }
+  if (value < 10) valueString = String("0") + valueString;
   return valueString;
 }
 
@@ -992,10 +962,10 @@ String zeroPad( int value ) {
 String fillMessage() {
   String bmsg       = "";
 
-  bmsg = bmsg + WiFi.localIP().toString().c_str() + "<BR>";
+  bmsg = bmsg + WiFi.localIP().toString().c_str();
   bmsg = bmsg + DateFormatter::format("Startpunt: %d/%m/%Y %H:%M:%S", startDateInt);
   bmsg = bmsg + DateFormatter::format(" Meetpunt: %d/%m/%Y %H:%M:%S", DateTime.now());
-  bmsg += "<p>";
+  bmsg += paragraph;
             
   bmsg += "Momenteel ";
   switch ( currentControllerState ) {
@@ -1009,30 +979,8 @@ String fillMessage() {
       bmsg = bmsg + "Verwarmen: ";
       break;
   }
-  bmsg = bmsg + showTime(millisInControllerState/1000,false) + "<BR>";
-  bmsg = bmsg + "Wort temperatuur: " + wortTemp;
-  bmsg = bmsg + " Frigo temperatuur: " + frigoTemp;
-  bmsg += "<p>";
- 
-  bmsg = bmsg + "maxWortTemp: " + maxWortTemp + "<BR>";
-  bmsg = bmsg + "minWortTemp: " + minWortTemp + "<BR>";
-  bmsg = bmsg + "MaxTimeHeating: ";
-  bmsg = bmsg + showTime(maxTimeHeating/1000,false) + "<BR>";
-  bmsg = bmsg + "MaxTimeCooling: ";
-  bmsg = bmsg + showTime(maxTimeCooling/1000,false);
-  bmsg += "<p>";
-
-  bmsg = bmsg + "Aantal Coolings: " + countStatCool;
-  bmsg = bmsg + " Totaal: " + countStatCoolTotal + "<BR>";
-  bmsg = bmsg + "Aantal Heatings: " + countStatHeat;
-  bmsg = bmsg + " Totaal: " + countStatHeatTotal;
-  bmsg += "<p>";  
-
-  bmsg = bmsg + "Aantal tilts: " + countTilts;
-  bmsg = bmsg + " Totaal: " + countTiltsTotal + "<BR>";
-  bmsg = bmsg + "Laatste tilt-tijd: " + showTime(millisBetweenTilts/1000,true);
-  bmsg += "<p>";
-  
+  bmsg += paragraph;
+  bmsg = bmsg + oneLineMessage("STATUS");
   return bmsg;
 }
 
@@ -1042,10 +990,10 @@ String fillMessage() {
 String fillStateMessage() {
   String bmsg       = "";
 
-  bmsg = bmsg + WiFi.localIP().toString().c_str() + "<BR>";
+  bmsg = bmsg + WiFi.localIP().toString().c_str();
   bmsg = bmsg + DateFormatter::format("Startpunt: %d/%m/%Y %H:%M:%S", startDateInt);
   bmsg = bmsg + DateFormatter::format(" Meetpunt: %d/%m/%Y %H:%M:%S", DateTime.now());
-  bmsg += "<p>";
+  bmsg += paragraph;
             
   bmsg += "Naar ";
   switch ( currentControllerState ) {
@@ -1059,10 +1007,12 @@ String fillStateMessage() {
       bmsg = bmsg + "Verwarmen";
       break;
   }
-  bmsg = bmsg + "--> Wort temperatuur: " + wortTemp;
-  bmsg = bmsg + " Frigo temperatuur: " + frigoTemp;
-  bmsg += "<p>";
-   
+  bmsg = bmsg + "--> Temp Wort: " + wortTemp;
+  bmsg = bmsg + " Frigo: " + frigoTemp;
+  bmsg += paragraph;
+
+  bmsg = bmsg + oneLineMessage("StateCHANGE");
+  
   return bmsg;
 }
 
@@ -1072,10 +1022,10 @@ String fillStateMessage() {
  */
 String fillAlertMessage() {  
   String bmsg       = "";
-  bmsg = bmsg + WiFi.localIP().toString().c_str() + "<BR>";
+  bmsg = bmsg + WiFi.localIP().toString().c_str();
   bmsg = bmsg + DateFormatter::format("Startpunt: %d/%m/%Y %H:%M:%S", startDateInt);
   bmsg = bmsg + DateFormatter::format(" Meetpunt: %d/%m/%Y %H:%M:%S", DateTime.now());
-  bmsg += "<p>";
+  bmsg += paragraph;
             
   bmsg += "Momenteel ";
   switch ( currentControllerState ) {
@@ -1089,17 +1039,52 @@ String fillAlertMessage() {
       bmsg = bmsg + "Verwarmen: ";
       break;
   }
-  bmsg = bmsg + showTime(millisInControllerState/1000,false) + "<BR>";
-  
-  bmsg = bmsg + "Wort temperatuur: " + wortTemp;
-  bmsg = bmsg + " Frigo temperatuur: " + frigoTemp;
-  bmsg += "<p>";
+  bmsg = bmsg + showTime(millisInControllerState/1000,false);
+  bmsg = bmsg + " Temp Wort: " + wortTemp;
+  bmsg = bmsg + " Frigo: " + frigoTemp;
+  bmsg += paragraph;
+
+  bmsg = bmsg + oneLineMessage("ALERT");
   
   return bmsg;
 }
 
+String oneLineMessage(String newstate ) {
+  String olmsg    = "";
+  olmsg = olmsg + "startdt;startuur;nowdt;nowuur;currentstatus;tijdinstatus;newstatus;doelwort;doelfrigo;worttemp;";
+  olmsg = olmsg + "frigotemp;coolingsinframe;heatingsinframe;tiltsinframe;tijdtussentilts" + lbreak;
+  // startdatum
+  olmsg = olmsg + DateFormatter::format("%d/%m/%Y;", startDateInt);
+  olmsg = olmsg + DateFormatter::format("%H:%M:%S;", startDateInt);
+  // meetpunt
+  olmsg = olmsg + DateFormatter::format("%d/%m/%Y;", DateTime.now());
+  olmsg = olmsg + DateFormatter::format("%H:%M:%S;", DateTime.now());
+  switch ( currentControllerState ) {                     // status op meetpunt
+    case STATE_COOLING:
+      olmsg = olmsg + "Koelen;";
+      break;
+    case STATE_INACTIVE:
+      olmsg = olmsg + "Inactief;";
+      break;
+    case STATE_HEATING:
+      olmsg = olmsg + "Verwarmen;";
+      break;
+  }                                                     // tijd in huidige status
+  olmsg = olmsg + showTime(millisInControllerState/1000,false) + ";"; 
+  olmsg = olmsg + newstate + ";";                       // nieuwe status
+  olmsg = olmsg + targetTempW + ";";                    // doeltemperatuur
+  olmsg = olmsg + targetTempF + ";";                    // doeltemperatuur
+  olmsg = olmsg + wortTemp + ";";                       // huidige worttemp
+  olmsg = olmsg + frigoTemp + ";";                      // frigo temp
+  olmsg = olmsg + countStatCool + ";";                  // coolings in timeframe
+  olmsg = olmsg + countStatHeat + ";";                  // heatings in timeframe
+  olmsg = olmsg + countTilts + ";";                     // tilts in timeframe
+  olmsg = olmsg + showTime(millisBetweenTilts/1000,true);// tijd tussen 0-1 laatste tilt
+  return olmsg;
+}
+
 void serialMsgCsv(String newstate ) {
-  //startpunt;meetpunt;currentstatus;tijdinstatus;newstatus;
+  //start;now;currentstatus;tijdinstatus;newstatus;
   //doelwort;doelfrigo;worttemp;frigotemp;coolingsinframe;
   //heatingsinframe;tiltsinframe;tijdtussentilts
   //targetTempF=constrain(targetTempW-Kp*(wortTemp-targetTempW),targetTempW-TEMP_DANGER,targetTempW+TEMP_DANGER);
@@ -1113,17 +1098,15 @@ void serialMsgCsv(String newstate ) {
   // status op meetpunt
   switch ( currentControllerState ) {
     case STATE_COOLING:
-      Serial.print(F("Koelen"));
+      Serial.print(F("Koelen;"));
       break;
     case STATE_INACTIVE:
-      Serial.print(F("Inactief"));
+      Serial.print(F("Inactief;"));
       break;
     case STATE_HEATING:
-      Serial.print(F("Verwarmen"));
+      Serial.print(F("Verwarmen;"));
       break;
   }
-  Serial.print(F(";"));
-  
   // tijd in huidige status
   Serial.print(showTime(millisInControllerState/1000,false));
   Serial.print(F(";"));
@@ -1141,31 +1124,26 @@ void serialMsgCsv(String newstate ) {
   // frigo temp
   Serial.print(frigoTemp);
   Serial.print(F(";"));
-
   // coolings in timeframe
   Serial.print(countStatCool);
   Serial.print(F(";"));
   // heatings in timeframe
   Serial.print(countStatHeat);
   Serial.print(F(";"));
-
   // tilts (naar 0) in timeframe
   Serial.print(countTilts);
   Serial.print(F(";"));
   // tijd tussen 0-1 laatste tilt
   Serial.print(showTime(millisBetweenTilts/1000,true));
-
   Serial.println(F(""));
 }
 
 void serialWifi(boolean wstate) {
   if (wstate) {
     Serial.println(F(""));
-    //Serial.println(ssid);
     Serial.print(F("IP address: "));
     Serial.println(WiFi.localIP());
-  }
-  else {
+  } else {
     Serial.println("");
     Serial.println(F("Connection failed."));
   }
@@ -1184,42 +1162,185 @@ void serialTilted() {
   Serial.println(countTiltsTotal);
 }
 
-void EEPROMReadSettings() {  // read settings from EEPROM
+/*
+ * EEPROM dingen
+ */
+void EEPROMReadSettings() {  // Lees waardes uit EEPROM
   EEPROM.get(10, targetTempW);
   EEPROM.get(20, millisMessage);
   EEPROM.get(30, countTiltsTotal);
-  EEPROM.get(100, startDateInt);
-  Serial.print(F("Import from EEPROM: TempW:"));
-  Serial.print(targetTempW);
-  Serial.print(F(" millisMessage:"));
-  Serial.print(millisMessage);
-  Serial.print(F(" startDateInt:"));
-  Serial.print(startDateInt);
-  Serial.println("");
+  EEPROM.get(40, startDateInt);
 }
-
-void EEPROMWriteSettings() {  // write current settings to EEPROM
+void EEPROMWriteSettings() {  // Bewaar waardes in EEPROM
   byte temp = EEPROM_VER;
   EEPROM.put(0, temp);
   EEPROM.put(10, targetTempW);
   EEPROM.put(20, millisMessage);
   EEPROM.put(30, countTiltsTotal);
-  EEPROM.put(100, startDateInt);
+  EEPROM.put(40, startDateInt);
   EEPROM.commit();
 }
-
-/*
- * Bewaar defaults in EEPROM
- */
-void EEPROMWritePresets() {
+void EEPROMWritePresets() {   // Reset waardes in EEPROM
   startDateInt = DateTime.now();
   byte temp = EEPROM_VER;
   // double=8 int=4 byte=1 bool=1 startDateInt
   EEPROM.put(0, temp);            // update EEPROM version
   float presettemp = 21.00;
-  EEPROM.put(10, presettemp);          // targetTempW
+  EEPROM.put(10, presettemp);     // targetTempW
   EEPROM.put(20, 3600000);        // millisMessage
-  EEPROM.put(30, countTiltsTotal);// totaal tilts
-  EEPROM.put(100, startDateInt);  // startdate
+  EEPROM.put(30, 0);              // totaal tilts
+  EEPROM.put(40, startDateInt);   // startdate
   EEPROM.commit();
+}
+
+//Webservice
+void handle_OnConnect() {
+  String lastTilted = showTime(millisLastTilt/1000,false);
+  String currentState = "";
+  
+  switch (currentControllerState) {
+    case STATE_COOLING:
+      currentState="COOL";
+    case STATE_INACTIVE:
+      currentState="INACTIVE";
+    case STATE_HEATING:
+      currentState="HEAT";
+  }
+  server.send(200, "text/html", SendHTML(wortTemp,frigoTemp,targetTempF,targetTempW,lastTilted,currentState)); 
+}
+
+void handle_NotFound(){
+  server.send(404, "text/plain", "Not found");
+}
+
+String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTempW, String lastTilted, String currentState){
+  String ptr = "<!DOCTYPE html>";
+  ptr +="<html>";
+  ptr +="<head>";
+  ptr +="<title>GistController</title>";
+  ptr +="<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  ptr +="<link href='https://fonts.googleapis.com/css?family=Open+Sans:300,400,600' rel='stylesheet'>";
+  ptr +="<style>";
+  ptr +="html { font-family: 'Open Sans', sans-serif; display: block; margin: 0px auto; text-align: center;color: #444444;}";
+  ptr +="body{margin-top: 50px;} ";
+  ptr +="h1 {margin: 50px auto 30px;} ";
+  ptr +=".side-by-side{display: table-cell;vertical-align: middle;position: relative;}";
+  ptr +=".text{font-weight: 600;font-size: 19px;width: 200px;}";
+  ptr +=".temperature{font-weight: 300;font-size: 50px;padding-right: 15px;}";
+  ptr +=".wort-temp .temperature{color: #3B97D3;}";
+  ptr +=".frigo-temp .temperature{color: #F29C1F;}";
+  ptr +=".wort-target .temperature{color: #26B99A;}";
+  ptr +=".frigo-target .temperature{color: #26B99A;}";
+  ptr +=".last-tilted .temperature{color: #26B99A;}";
+  ptr +=".superscript{font-size: 17px;font-weight: 600;position: absolute;right: -5px;top: 15px;}";
+  ptr +=".data{padding: 10px;}";
+  ptr +=".container{display: table;margin: 0 auto;}";
+  ptr +=".icon{width:82px}";
+  ptr +="</style>";
+  ptr +="<script>\n";
+  
+  ptr +="setInterval(loadDoc,1000);\n";
+  ptr +="function loadDoc() {\n";
+  ptr +="var xhttp = new XMLHttpRequest();\n";
+  ptr +="xhttp.onreadystatechange = function() {\n";
+  ptr +="if (this.readyState == 4 && this.status == 200) {\n";
+  ptr +="document.body.innerHTML =this.responseText}\n";
+  ptr +="};\n";
+  ptr +="xhttp.open(\"GET\", \"/\", true);\n";
+  ptr +="xhttp.send();\n";
+  ptr +="}\n";
+  ptr +="</script>\n";
+  ptr +="</head>";
+  
+  ptr +="<body>";
+  
+  ptr +="<h1>GistController</h1>";
+  ptr +="<h3>";
+  ptr +=currentState;
+  ptr +="</h3>";
+  
+  ptr +="<div class='container'>";
+  
+  ptr +="<div class='data wort-temp'>";
+  ptr +="<div class='side-by-side icon'>";
+  ptr +="<svg viewBox='17.999 0 65 69.915' xmlns=http://www.w3.org/2000/svg>";
+  ptr +="<path d='M 80.833 54.927 L 59.238 18.944 L 59.238 4.37 L 61.423 4.37 C 62.625 4.37 63.608 3.387 63.608 2.185 C 63.608 0.983 ";
+  ptr +="62.625 0 61.423 0 L 39.574 0 C 38.373 0 37.389 0.983 37.389 2.185 C 37.389 3.387 38.373 4.37 39.574 4.37 L 41.759 4.37 L 41.759 ";
+  ptr +="18.944 L 20.164 54.927 C 15.218 63.171 19.037 69.915 28.65 69.915 L 72.347 69.915 C 81.961 69.915 85.779 63.171 80.833 54.927 Z M ";
+  ptr +="31.998 43.697 L 46.129 20.146 L 46.129 4.37 L 54.868 4.37 L 54.868 20.146 L 68.999 43.697 L 31.998 43.697 Z'/>";
+  ptr +="</svg>";
+  ptr +="</div>";
+  ptr +="<div class='side-by-side text'>Wort</div>";
+  ptr +="<div class='side-by-side temperature'>";
+  ptr +=(float)wortTemp;
+  ptr +="<span class='superscript'>&deg;C</span></div>";
+  ptr +="</div>";
+  
+  ptr +="<div class='data frigo-temp'>";
+  ptr +="<div class='side-by-side icon'>";
+  ptr +="<svg viewBox='18.534 26.978 65 37.624' xmlns=http://www.w3.org/2000/svg>";
+  ptr +="<path d='M 57.783 47.694 C 57.783 47.694 58.667 35.794 47.761 34.437 C 38.413 33.482 35.569 42.169 35.569 42.169 C 35.569 42.169 ";
+  ptr +="32.755 39.462 28.936 41.672 C 25.518 43.783 26.124 47.644 26.124 47.644 C 26.124 47.644 18.534 49.12 18.534 56.859 C 18.743 64.718 ";
+  ptr +="26.728 64.523 26.728 64.523 L 56.594 64.602 C 56.594 64.602 63.742 64.685 65.044 57.321 C 65.548 49.282 57.783 47.694 57.783 47.694 ";
+  ptr +="Z M 76.25 40.309 C 76.25 40.309 77.134 28.409 66.23 27.05 C 56.882 26.095 53.923 34.896 53.923 34.896 C 53.923 34.896 59.369 38.056 ";
+  ptr +="59.6 46.597 C 63.062 47.637 66.752 50.493 66.868 57.188 L 75.06 57.217 C 75.06 57.217 82.209 57.3 83.51 49.936 C 84.015 41.893 76.25 ";
+  ptr +="40.309 76.25 40.309 Z'/>";
+  ptr +="</svg>";  
+  ptr +="</div>";
+  ptr +="<div class='side-by-side text'>Frigo</div>";
+  ptr +="<div class='side-by-side temperature'>";
+  ptr +=(float)frigoTemp;
+  ptr +="<span class='superscript'>&deg;C</span></div>";
+  ptr +="</div>";
+
+  ptr +="<div class='data wort-target'>";
+  ptr +="<div class='side-by-side icon'>";
+  ptr +="<svg viewBox='17.999 0 65 69.915' xmlns=http://www.w3.org/2000/svg>";
+  ptr +="<path d='M 80.833 54.927 L 59.238 18.944 L 59.238 4.37 L 61.423 4.37 C 62.625 4.37 63.608 3.387 63.608 2.185 C 63.608 0.983 ";
+  ptr +="62.625 0 61.423 0 L 39.574 0 C 38.373 0 37.389 0.983 37.389 2.185 C 37.389 3.387 38.373 4.37 39.574 4.37 L 41.759 4.37 L 41.759 ";
+  ptr +="18.944 L 20.164 54.927 C 15.218 63.171 19.037 69.915 28.65 69.915 L 72.347 69.915 C 81.961 69.915 85.779 63.171 80.833 54.927 Z M ";
+  ptr +="31.998 43.697 L 46.129 20.146 L 46.129 4.37 L 54.868 4.37 L 54.868 20.146 L 68.999 43.697 L 31.998 43.697 Z'/>";
+  ptr +="</svg>";
+  ptr +="</div>";
+  ptr +="<div class='side-by-side text'>Doel Wort</div>";
+  ptr +="<div class='side-by-side temperature'>";
+  ptr +=(float)targetTempW;
+  ptr +="<span class='superscript'>&deg;C</span></div>";
+  ptr +="</div>";
+  
+  ptr +="<div class='data frigo-target'>";
+  ptr +="<div class='side-by-side icon'>";
+  ptr +="<svg viewBox='18.534 26.978 65 37.624' xmlns=http://www.w3.org/2000/svg>";
+  ptr +="<path d='M 57.783 47.694 C 57.783 47.694 58.667 35.794 47.761 34.437 C 38.413 33.482 35.569 42.169 35.569 42.169 C 35.569 42.169 ";
+  ptr +="32.755 39.462 28.936 41.672 C 25.518 43.783 26.124 47.644 26.124 47.644 C 26.124 47.644 18.534 49.12 18.534 56.859 C 18.743 64.718 ";
+  ptr +="26.728 64.523 26.728 64.523 L 56.594 64.602 C 56.594 64.602 63.742 64.685 65.044 57.321 C 65.548 49.282 57.783 47.694 57.783 47.694 ";
+  ptr +="Z M 76.25 40.309 C 76.25 40.309 77.134 28.409 66.23 27.05 C 56.882 26.095 53.923 34.896 53.923 34.896 C 53.923 34.896 59.369 38.056 ";
+  ptr +="59.6 46.597 C 63.062 47.637 66.752 50.493 66.868 57.188 L 75.06 57.217 C 75.06 57.217 82.209 57.3 83.51 49.936 C 84.015 41.893 76.25 ";
+  ptr +="40.309 76.25 40.309 Z'/>";
+  ptr +="</svg>";  
+  ptr +="</div>";
+  ptr +="<div class='side-by-side text'>Doel Frigo</div>";
+  ptr +="<div class='side-by-side temperature'>";
+  ptr +=(float)targetTempF;
+  ptr +="<span class='superscript'>&deg;C</span></div>";
+  ptr +="</div>";
+
+  ptr +="<div class='data last-tilted'>";
+  ptr +="<div class='side-by-side icon'>";
+  ptr +="<svg viewBox='31.856 63.712 65 58.08' xmlns='http://www.w3.org/2000/svg'>";
+  ptr +="<path d='M 91.323 103.088 L 89.1 114.855 L 39.612 114.855 L 37.389 103.088 L 31.856 103.088 L 31.856 121.792 L 96.856 121.792 L ";
+  ptr +="96.856 103.088 L 91.323 103.088 Z M 89.922 82.188 L 73.631 82.188 L 73.631 75.391 L 55.086 75.391 L 55.086 82.188 L 38.95 82.188 ";
+  ptr +="L 64.27 108.663 L 89.922 82.188 Z M 73.629 63.712 L 55.083 63.712 L 55.083 66.185 L 73.629 66.185 L 73.629 63.712 Z M 73.629 68.331 ";
+  ptr +="L 55.083 68.331 L 55.083 73.059 L 73.629 73.059 L 73.629 68.331 Z'/>";
+  ptr +="</svg>";
+  ptr +="</div>";
+  ptr +="<div class='side-by-side text'>Laatste Tilt</div>";
+  ptr +="<div class='side-by-side temperature'>";
+  ptr +=lastTilted;
+  ptr +="</div>";
+  
+  ptr +="</div>";
+  ptr +="</body>";
+  ptr +="</html>";
+  return ptr;
 }
