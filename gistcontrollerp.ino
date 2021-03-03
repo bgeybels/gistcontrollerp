@@ -1,9 +1,9 @@
 /*
  * GIP Jobbe Geybels 2020-2021
  * Gistcontroller v6.x op een NODEMCU-board (ESP8266)
- *    P-Controle: Proportionele Controle
+ *    P-Controle: Simpele Proportionele Controle
  * 
- * WifiSetup      via WiFiManager
+ * WifiSetup      via WiFiManager (On Demand via IPscherm+select)
  * I2C-ADXL345    Gyroscoop
  * I2C-LCD        LCD
  * RotaryEncoder  Druk- en draai-knop
@@ -1195,25 +1195,30 @@ void EEPROMWritePresets() {   // Reset waardes in EEPROM
 
 //Webservice
 void handle_OnConnect() {
-  String lastTilted = showTime(millisLastTilt/1000,false);
+  String lastTilted = showTime(millisBetweenTilts/1000,false);
+  String lastMessage = showTime(millis() - millisElapsedMessages,false);
+  String currentStateTime = showTime(millisInControllerState/1000,false);
   String currentState = "";
   
   switch (currentControllerState) {
     case STATE_COOLING:
       currentState="COOL";
+      break;
     case STATE_INACTIVE:
       currentState="INACTIVE";
+      break;
     case STATE_HEATING:
       currentState="HEAT";
+      break;
   }
-  server.send(200, "text/html", SendHTML(wortTemp,frigoTemp,targetTempF,targetTempW,lastTilted,currentState)); 
+  server.send(200, "text/html", SendHTML(wortTemp,frigoTemp,targetTempF,targetTempW,lastTilted,currentState,countTilts,countTiltsTotal,currentStateTime,lastMessage)); 
 }
 
 void handle_NotFound(){
   server.send(404, "text/plain", "Not found");
 }
 
-String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTempW, String lastTilted, String currentState){
+String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTempW, String lastTilted, String currentState,int countTilts, int countTiltsTotal, String currentStateTime, String lastMessage){
   String ptr = "<!DOCTYPE html>";
   ptr +="<html>";
   ptr +="<head>";
@@ -1226,16 +1231,17 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   ptr +="h1 {margin: 50px auto 30px;} ";
   ptr +=".side-by-side{display: table-cell;vertical-align: middle;position: relative;}";
   ptr +=".text{font-weight: 600;font-size: 19px;width: 200px;}";
-  ptr +=".temperature{font-weight: 300;font-size: 50px;padding-right: 15px;}";
+  ptr +=".temperature{font-weight: 300;font-size: 40px;padding-right: 15px;}";
+  ptr +=".tilt{font-weight: 300;font-size: 19px;padding-right: 15px;}";
   ptr +=".wort-temp .temperature{color: #3B97D3;}";
   ptr +=".frigo-temp .temperature{color: #F29C1F;}";
-  ptr +=".wort-target .temperature{color: #26B99A;}";
-  ptr +=".frigo-target .temperature{color: #26B99A;}";
-  ptr +=".last-tilted .temperature{color: #26B99A;}";
+  ptr +=".wort-target .temperature{color: #3B97D3;}";
+  ptr +=".frigo-target .temperature{color: #3B97D3;}";
+  ptr +=".last-tilted .tilt{color: #26B99A;}";
   ptr +=".superscript{font-size: 17px;font-weight: 600;position: absolute;right: -5px;top: 15px;}";
   ptr +=".data{padding: 10px;}";
   ptr +=".container{display: table;margin: 0 auto;}";
-  ptr +=".icon{width:82px}";
+  ptr +=".icon{width:62px}";
   ptr +="</style>";
   ptr +="<script>\n";
   
@@ -1254,10 +1260,12 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   
   ptr +="<body>";
   
-  ptr +="<h1>GistController</h1>";
+  ptr +="<h2>GistController</h2>";
   ptr +="<h3>";
   ptr +=currentState;
-  ptr +="</h3>";
+  ptr +=" (";
+  ptr +=currentStateTime;
+  ptr +=")</h3>";
   
   ptr +="<div class='container'>";
   
@@ -1334,9 +1342,31 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   ptr +="L 55.083 68.331 L 55.083 73.059 L 73.629 73.059 L 73.629 68.331 Z'/>";
   ptr +="</svg>";
   ptr +="</div>";
-  ptr +="<div class='side-by-side text'>Laatste Tilt</div>";
+  ptr +="<div class='side-by-side text'>TiltTijd</div>";
   ptr +="<div class='side-by-side temperature'>";
   ptr +=lastTilted;
+  ptr +="</div>";
+
+  ptr +="<div class='data last-tilted'>";
+  ptr +="<div class='side-by-side icon'></div>";
+  ptr +="<div class='side-by-side text'>Tilts</div>";
+  ptr +="<div class='side-by-side temperature'>";
+  ptr +=countTilts;
+  ptr +="/";
+  ptr +=countTiltsTotal;
+  ptr +="</div>";
+
+  ptr +="<div class='data last-tilted'>";
+  ptr +="<div class='side-by-side icon'>";
+  ptr +="<svg viewBox='31.856 63.712 65 58.08' xmlns='http://www.w3.org/2000/svg'>";
+  ptr +="<path d='M464 64h-416c-26.4 0-48 21.6-48 48v320c0 26.4 21.6 48 48 48h416c26.4 0 48-21.6 48-48v-320c0-26.4-21.6-48-48-48zM199.37 ";
+  ptr +="275.186l-135.37 105.446v-250.821l135.37 145.375zM88.19 128h335.62l-167.81 126-167.81-126zM204.644 280.849l51.356 55.151 51.355-55.151 ";
+  ptr +="105.277 135.151h-313.264l105.276-135.151zM312.63 275.186l135.37-145.375v250.821l-135.37-105.446z'/>";
+  ptr +="</svg>";
+  ptr +="</div>";
+  ptr +="<div class='side-by-side text'>Boodschap</div>";
+  ptr +="<div class='side-by-side temperature'>";
+  ptr +=lastMessage;
   ptr +="</div>";
   
   ptr +="</div>";
