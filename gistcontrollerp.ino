@@ -85,11 +85,6 @@ void updateTemperature() {
   float minvalue = targetTempW - TEMP_DANGER_C;
   float maxvalue = targetTempW + TEMP_DANGER_H;
   targetTempF=constrain(targetTempW-Kp*(wortTemp-targetTempW),minvalue,maxvalue);
- 
-  if ( debug_msgcsv && targetTempF != last_targetTempF ) {
-    last_targetTempF = targetTempF;
-    serialMsgCsv("targetTempF");
-  }
   
   // Alert-message als er iets grondig fout loopt
   if ( send_msg ) {
@@ -113,35 +108,11 @@ void getTemperature() {
 /**
  * Wijzig status adhv temperatuur + bewaar de timers 
  * (HEATING) <=> (INACTIVE) <=> (COOLING)
- * debug_msgcsv=true --> serial print csv-formaat bij elke statusupdate
  */
 void controlState() {
   currentMillis = millis();
   millisInControllerState = currentMillis - millisStateStart;
 
-  if (debug) {
-    if (currentMillis-logMillis > 60000) {
-      logMillis = currentMillis;
-      Serial.print(DateFormatter::format("%H:%M", DateTime.now()));
-      Serial.print(F(";"));
-      Serial.print(wortTemp);
-      Serial.print(F(";"));
-      Serial.print(frigoTemp);
-      Serial.print(F(";"));
-      Serial.print(targetTempF);
-      switch (currentControllerState) {
-        case STATE_COOLING:
-          Serial.println(F(";COOL"));
-          break;
-        case STATE_INACTIVE:
-          Serial.println(F(";INACTIVE"));
-          break;
-        case STATE_HEATING:
-          Serial.println(F(";HEAT"));
-          break;
-      }
-    }
-  }
   // Manuele status
   if (forced) return;
 
@@ -154,7 +125,6 @@ void controlState() {
       // Compressor moet minstens een bepaalde tijd draaien voor hij af mag
       if (runTime < coolMinOn) break;
       if (frigoTemp < targetTempF) {
-        if (debug_msgcsv) {serialMsgCsv("StartInactief");}
         //stop KOELEN + zet INACTIEF
         currentControllerState = STATE_INACTIVE;
         if (millisInControllerState > maxTimeCooling) {
@@ -171,7 +141,6 @@ void controlState() {
     // Momenteel INACTIEF = niks aan het doen
     case STATE_INACTIVE:
       if ( frigoTemp < ( targetTempF - Deadband ) ) {
-        if (debug_msgcsv) {serialMsgCsv("StartWarmen");}
         //start VERWARMEN
         currentControllerState = STATE_HEATING;
         millisStateStart = currentMillis;
@@ -182,7 +151,6 @@ void controlState() {
       }
       else if (( frigoTemp > ( targetTempF + Deadband ) ) 
            && ((unsigned long)((millis() - stopTime) / 1000) > coolMinOff)) {
-        if (debug_msgcsv) {serialMsgCsv("StartKoelen");}
         //start KOELEN
         currentControllerState = STATE_COOLING;
         millisStateStart = currentMillis;
@@ -196,7 +164,6 @@ void controlState() {
     case STATE_HEATING:
       { runTime = millis() - startTime;  // runtime in ms    
       if ( frigoTemp > targetTempF ) {
-        if (debug_msgcsv) {serialMsgCsv("StartInactief");}
         //stop VERWARMEN    
         currentControllerState = STATE_INACTIVE;
         if (millisInControllerState > maxTimeHeating) {
@@ -659,16 +626,11 @@ void lcd_serial_msg_Init() {
   lcd.print(F("Gist Controller"));
   lcd.setCursor(17,0);
   lcd.print(versie);  
-  if ( debug || debug_tilt || debug_wifi || debug_buttons || debug_msgcsv) {
+  if ( debug || debug_tilt || debug_wifi || debug_buttons ) {
       Serial.begin(lcdBaud);
       Serial.println(F("Initialisatie Gist-controller"));
   }
   delay(1000);
-  if (debug_msgcsv) {
-    Serial.print(F("runningtime;currentstatus;tijdinstatus;newstatus;"));
-    Serial.print(F("doelwort;doelfrigo;worttemp;frigotemp;coolingsinframe;"));
-    Serial.println(F("heatingsinframe;tiltsinframe;tijdtussentilts"));
-  }
 }
 
 /*
@@ -1083,61 +1045,6 @@ String oneLineMessage(String newstate ) {
   return olmsg;
 }
 
-void serialMsgCsv(String newstate ) {
-  //start;now;currentstatus;tijdinstatus;newstatus;
-  //doelwort;doelfrigo;worttemp;frigotemp;coolingsinframe;
-  //heatingsinframe;tiltsinframe;tijdtussentilts
-  //targetTempF=constrain(targetTempW-Kp*(wortTemp-targetTempW),targetTempW-TEMP_DANGER,targetTempW+TEMP_DANGER);
-
-  // startdatum
-  Serial.print(DateFormatter::format("%d/%m/%Y %H:%M:%S", startDateInt));
-  Serial.print(F(";"));
-  // meetpunt
-  Serial.print(DateFormatter::format("%d/%m/%Y %H:%M:%S", DateTime.now()));
-  Serial.print(F(";"));
-  // status op meetpunt
-  switch ( currentControllerState ) {
-    case STATE_COOLING:
-      Serial.print(F("Koelen;"));
-      break;
-    case STATE_INACTIVE:
-      Serial.print(F("Inactief;"));
-      break;
-    case STATE_HEATING:
-      Serial.print(F("Verwarmen;"));
-      break;
-  }
-  // tijd in huidige status
-  Serial.print(showTime(millisInControllerState/1000,false));
-  Serial.print(F(";"));
-  // nieuwe status
-  Serial.print(newstate);
-  Serial.print(F(";"));
-  // doeltemperatuur
-  Serial.print(targetTempW);
-  Serial.print(F(";"));
-  Serial.print(targetTempF);
-  Serial.print(F(";"));
-  // huidige worttemp
-  Serial.print(wortTemp);
-  Serial.print(F(";"));
-  // frigo temp
-  Serial.print(frigoTemp);
-  Serial.print(F(";"));
-  // coolings in timeframe
-  Serial.print(countStatCool);
-  Serial.print(F(";"));
-  // heatings in timeframe
-  Serial.print(countStatHeat);
-  Serial.print(F(";"));
-  // tilts (naar 0) in timeframe
-  Serial.print(countTilts);
-  Serial.print(F(";"));
-  // tijd tussen 0-1 laatste tilt
-  Serial.print(showTime(millisBetweenTilts/1000,true));
-  Serial.println(F(""));
-}
-
 void serialWifi(boolean wstate) {
   if (wstate) {
     Serial.println(F(""));
@@ -1196,7 +1103,7 @@ void EEPROMWritePresets() {   // Reset waardes in EEPROM
 //Webservice
 void handle_OnConnect() {
   String lastTilted = showTime(millisBetweenTilts/1000,false);
-  String lastMessage = showTime(millis() - millisElapsedMessages,false);
+  String lastMessage = showTime((millis() - millisElapsedMessages)/1000,false);
   String currentStateTime = showTime(millisInControllerState/1000,false);
   String currentState = "";
   
@@ -1231,17 +1138,21 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   ptr +="h1 {margin: 50px auto 30px;} ";
   ptr +=".side-by-side{display: table-cell;vertical-align: middle;position: relative;}";
   ptr +=".text{font-weight: 600;font-size: 19px;width: 200px;}";
-  ptr +=".temperature{font-weight: 300;font-size: 40px;padding-right: 15px;}";
+  ptr +=".temperature{font-weight: 300;font-size: 30px;padding-right: 15px;}";
+  ptr +=".intervals{font-weight: 300;font-size: 20px;padding-right: 15px;}";
   ptr +=".tilt{font-weight: 300;font-size: 19px;padding-right: 15px;}";
+  ptr +=".message{font-weight: 300;font-size: 19px;padding-right: 15px;}";
   ptr +=".wort-temp .temperature{color: #3B97D3;}";
   ptr +=".frigo-temp .temperature{color: #F29C1F;}";
   ptr +=".wort-target .temperature{color: #3B97D3;}";
   ptr +=".frigo-target .temperature{color: #3B97D3;}";
   ptr +=".last-tilted .tilt{color: #26B99A;}";
+  ptr +=".count-tilted .tilt{color: #26B99A;}";
+  ptr +=".last-message .message{color: #26B99A;}";
   ptr +=".superscript{font-size: 17px;font-weight: 600;position: absolute;right: -5px;top: 15px;}";
   ptr +=".data{padding: 10px;}";
   ptr +=".container{display: table;margin: 0 auto;}";
-  ptr +=".icon{width:62px}";
+  ptr +=".icon{width:52px}";
   ptr +="</style>";
   ptr +="<script>\n";
   
@@ -1267,7 +1178,7 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   ptr +=currentStateTime;
   ptr +=")</h3>";
   
-  ptr +="<div class='container'>";
+  ptr +="<div class='container'>";  
   
   ptr +="<div class='data wort-temp'>";
   ptr +="<div class='side-by-side icon'>";
@@ -1278,7 +1189,7 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   ptr +="31.998 43.697 L 46.129 20.146 L 46.129 4.37 L 54.868 4.37 L 54.868 20.146 L 68.999 43.697 L 31.998 43.697 Z'/>";
   ptr +="</svg>";
   ptr +="</div>";
-  ptr +="<div class='side-by-side text'>Wort</div>";
+  ptr +="<div class='side-by-side text'>Wort</div>";  
   ptr +="<div class='side-by-side temperature'>";
   ptr +=(float)wortTemp;
   ptr +="<span class='superscript'>&deg;C</span></div>";
@@ -1343,20 +1254,20 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   ptr +="</svg>";
   ptr +="</div>";
   ptr +="<div class='side-by-side text'>TiltTijd</div>";
-  ptr +="<div class='side-by-side temperature'>";
+  ptr +="<div class='side-by-side intervals'>";
   ptr +=lastTilted;
   ptr +="</div>";
 
-  ptr +="<div class='data last-tilted'>";
+  ptr +="<div class='data count-tilted'>";
   ptr +="<div class='side-by-side icon'></div>";
   ptr +="<div class='side-by-side text'>Tilts</div>";
-  ptr +="<div class='side-by-side temperature'>";
+  ptr +="<div class='side-by-side intervals'>";
   ptr +=countTilts;
   ptr +="/";
   ptr +=countTiltsTotal;
   ptr +="</div>";
 
-  ptr +="<div class='data last-tilted'>";
+  ptr +="<div class='data last-message'>";
   ptr +="<div class='side-by-side icon'>";
   ptr +="<svg viewBox='31.856 63.712 65 58.08' xmlns='http://www.w3.org/2000/svg'>";
   ptr +="<path d='M464 64h-416c-26.4 0-48 21.6-48 48v320c0 26.4 21.6 48 48 48h416c26.4 0 48-21.6 48-48v-320c0-26.4-21.6-48-48-48zM199.37 ";
@@ -1365,7 +1276,7 @@ String SendHTML(float wortTemp,float frigoTemp,float targetTempF, float targetTe
   ptr +="</svg>";
   ptr +="</div>";
   ptr +="<div class='side-by-side text'>Boodschap</div>";
-  ptr +="<div class='side-by-side temperature'>";
+  ptr +="<div class='side-by-side intervals'>";
   ptr +=lastMessage;
   ptr +="</div>";
   

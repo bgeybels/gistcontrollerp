@@ -6,7 +6,6 @@ const int EEPROM_VER              = 15;    // EEPROM versie
 bool    debug                     = false;
 bool    debug_tilt                = false; // serieel tilt-test
 bool    debug_buttons             = false; // serieel button-test
-bool    debug_msgcsv              = false; // serieel csv-formaat
 bool    debug_wifi                = false; // serieel wifi-test
 
 bool    wm_reset                  = false; // true=reset wifimanager
