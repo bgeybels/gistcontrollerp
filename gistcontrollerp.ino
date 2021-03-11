@@ -30,34 +30,20 @@
 #include "Gsender.h"                       // GMail settings
 #include "parameters.h"                    // Parameters
 
-// Initialiseer librarys 
-LiquidCrystal_I2C lcd = LiquidCrystal_I2C(0x27, 20, 4);
-RotaryFullStep rotary(RO_LEFT, RO_RIGHT, true, 50);
-Adafruit_ADXL345_Unified tilter = Adafruit_ADXL345_Unified(12345);
-OneWire oneWire(TEMP_PIN);
-DallasTemperature sensors(&oneWire);
-WiFiManager wifiManager;
-ESP8266WebServer server(80);
-
 void setup(void) { 
-  // Initialseer LCD,Serieel en Serieel-message
-  lcd_serial_msg_Init();
-  // Initialiseer componenten
-  initSuccess = initComponents();
-  if (!initSuccess.isEmpty()) {
+  lcd_serial_msg_Init();                          // Init LCD,Serieel en Serieel-message-
+  initSuccess = initComponents();                 // Initialiseer componenten
+  if (!initSuccess.isEmpty()) {                   // endless loop = initialisatie was niet goed
     while(1) {
-      // endless loop = initialisatie was niet goed
       lcdShowInit("!! Probleem Init",2,0);
       lcdShowInit(initSuccess,3,0);
     }
   }
-  // Initialiseer wortTemp/max-minWortTemp
-  getTemperature();
+  getTemperature();                               // Initialiseer wortTemp/max-minWortTemp
   maxWortTemp = minWortTemp = wortTemp;
   if ( send_msg ) sendInitMessage();
 
-  // Toon hoofdscherm
-  currentLCDState == DISPLAY_SUMMARY;
+  currentLCDState == DISPLAY_SUMMARY;             // Toon hoofdscherm
   displayState();
 }
 
@@ -67,11 +53,11 @@ void loop(void) {
   controlState();                                 // Update status: koel,inactief,verwarm
   updateTilted();                                 // Controleer tiltsensor
   controlDisplayState();                          // Beheer LCD (display, backlight, button, ...)
-  if ( send_msg  ) {sendMessage();}               // Zend bericht als tijd verstreken 
+  if ( send_msg  ) sendBaseMessage();             // Stuur BASIS-email als tijd verstreken 
 }
 
 /**
- * Haal de huidige temperatuur op en update MAX- en MIN-Temp
+ * Ophalen huidige temperatuur, bereken targetTempF en update MAX/MIN-Temp
  */
 void updateTemperature() {
   getTemperature();
@@ -80,24 +66,24 @@ void updateTemperature() {
     digitalWrite(HEATING_PIN, LOW);
     digitalWrite(COOLING_PIN, LOW);
     forced=false;
-  }
-  
+  }  
   float minvalue = targetTempW - TEMP_DANGER_C;
   float maxvalue = targetTempW + TEMP_DANGER_H;
+  // Bereken de gewenste FrigoTemp om de gewenste WortTemp te behouden
   targetTempF=constrain(targetTempW-Kp*(wortTemp-targetTempW),minvalue,maxvalue);
+
+  if (wortTemp > maxWortTemp)       maxWortTemp = wortTemp;
+  else if (wortTemp < minWortTemp)  minWortTemp = wortTemp;
   
   // Alert-message als er iets grondig fout loopt
   if ( send_msg ) {
-    if ( wortTemp > (targetTempW + TEMP_DANGER_H) ) {sendAlertMessage();}
-    if ( wortTemp < (targetTempW - TEMP_DANGER_C) ) {sendAlertMessage();}  
+    if ( wortTemp > (targetTempW + TEMP_DANGER_H) ) sendAlertMessage();
+    if ( wortTemp < (targetTempW - TEMP_DANGER_C) ) sendAlertMessage(); 
   }
-  
-  if (wortTemp > maxWortTemp) {maxWortTemp = wortTemp;}
-  else if (wortTemp < minWortTemp) {minWortTemp = wortTemp;}
 }
 
 /**
- * Returns de huidige temperatuur van het wort
+ * Haal wort- frigo-temp op
  */
 void getTemperature() {
   sensors.requestTemperatures();            // Opvragen temperatuur
@@ -110,13 +96,14 @@ void getTemperature() {
  * (HEATING) <=> (INACTIVE) <=> (COOLING)
  */
 void controlState() {
-  currentMillis = millis();
+  currentMillis           = millis();
   millisInControllerState = currentMillis - millisStateStart;
 
-  // Manuele status
+  // Manuele status = geen verdere acties
   if (forced) return;
 
   // Automatische status
+  // adhv huidige status en targetTempF wijzig STATUS
   switch ( currentControllerState ) {
     // Momenteel aan het KOELEN
     case STATE_COOLING:
@@ -126,58 +113,53 @@ void controlState() {
       if (runTime < coolMinOn) break;
       if (frigoTemp < targetTempF) {
         //stop KOELEN + zet INACTIEF
-        currentControllerState = STATE_INACTIVE;
-        if (millisInControllerState > maxTimeCooling) {
-          maxTimeCooling = millisInControllerState;
-        }
-        millisStateStart = currentMillis;
+        currentControllerState  = STATE_INACTIVE;
+        if (millisInControllerState > maxTimeCooling) maxTimeCooling = millisInControllerState;
+        millisStateStart        = currentMillis;
         digitalWrite(COOLING_PIN, LOW);
-        if ( send_msg ) {sendStateMessage();}
+        if ( send_msg ) sendStateMessage();          // Stuur STATUS-email
       } else {
         // Alert-message als er iets grondig fout loopt
-        if ( send_msg && millisInControllerState > STATE_DANGER ) {sendAlertMessage();}
+        if ( send_msg && millisInControllerState > STATE_DANGER ) sendAlertMessage();
       }
       break;
     // Momenteel INACTIEF = niks aan het doen
     case STATE_INACTIVE:
       if ( frigoTemp < ( targetTempF - Deadband ) ) {
         //start VERWARMEN
-        currentControllerState = STATE_HEATING;
-        millisStateStart = currentMillis;
+        currentControllerState  = STATE_HEATING;
+        millisStateStart        = currentMillis;
         countStatHeat++;
         countStatHeatTotal++;
         digitalWrite(HEATING_PIN, HIGH);
-        if ( send_msg ) {sendStateMessage();}
+        if ( send_msg ) sendStateMessage();       // Stuur STATUS-email
       }
       else if (( frigoTemp > ( targetTempF + Deadband ) ) 
            && ((unsigned long)((millis() - stopTime) / 1000) > coolMinOff)) {
         //start KOELEN
-        currentControllerState = STATE_COOLING;
-        millisStateStart = currentMillis;
+        currentControllerState  = STATE_COOLING;
+        millisStateStart        = currentMillis;
         countStatCool++;
         countStatCoolTotal++;
         digitalWrite(COOLING_PIN, HIGH);
-        if ( send_msg ) {sendStateMessage();}
+        if ( send_msg ) sendStateMessage();       // Stuur STATUS-email
       }
       break;
     // Momenteel aan het VERWARMEN
     case STATE_HEATING:
-      { runTime = millis() - startTime;  // runtime in ms    
+      runTime = millis() - startTime;  // runtime in ms    
       if ( frigoTemp > targetTempF ) {
         //stop VERWARMEN    
-        currentControllerState = STATE_INACTIVE;
-        if (millisInControllerState > maxTimeHeating) {
-          maxTimeHeating = millisInControllerState;
-        }
-        millisStateStart = currentMillis;
+        currentControllerState    = STATE_INACTIVE;
+        if (millisInControllerState > maxTimeHeating) maxTimeHeating = millisInControllerState;
+        millisStateStart          = currentMillis;
         digitalWrite(HEATING_PIN, LOW);
-        if ( send_msg ) {sendStateMessage();}
+        if ( send_msg ) sendStateMessage();       // Stuur STATUS-email
       } else {
         // Alert-message als er iets grondig fout loopt
-        if ( send_msg && millisInControllerState > 900000 ) {sendAlertMessage();}
+        if ( send_msg && millisInControllerState > STATE_DANGER ) sendAlertMessage();
       }
       break;
-      }
   }
 }
 
@@ -190,8 +172,8 @@ void updateTilted() {
   if (currentTilt != lastTilt) {
     // enkel de neutrale stand (=beneden) telt
     if (currentTilt == 0) {
-      millisBetweenTilts = currentMillis - millisLastTilt;
-      millisLastTilt = currentMillis;
+      millisBetweenTilts  = currentMillis - millisLastTilt;
+      millisLastTilt      = currentMillis;
       ++countTilts;           // tel 1 bij het aantal tiltwijzigingen binnen 1 bericht
       ++countTiltsTotal;      // tel 1 bij totaal aantal tilts
       EEPROMWriteSettings();  // bewaar in EEPROM
@@ -207,8 +189,8 @@ void getTilt() {
   gyro_X = (event.acceleration.x)/9.8;  
   gyro_Y = (event.acceleration.y)/9.8;
   // Negatieve meting omzetten naar positieve waarde
-  if (gyro_X < 0) { gyro_X = gyro_X * -1; }
-  if (gyro_Y < 0) { gyro_Y = gyro_Y * -1; }
+  if (gyro_X < 0) gyro_X = gyro_X * -1;
+  if (gyro_Y < 0) gyro_Y = gyro_Y * -1;
 
   currentTilt = 0;
   // Vergelijk de x-y-meting met tiltThreshold
@@ -221,14 +203,16 @@ void getTilt() {
 
 /*
  * Berichten: BASIS - INIT - STATUS - ALERT
+ * Vul telkens 'subject' (subjectMsg) en 'message' (fillXXMessage)
+ * sendMail     = Verstuur de email met subject en message
  */
-void sendMessage() {
+void sendBaseMessage() {
   currentMillis = millis();
   if ( WiFiConnected() && millisMessage > 0 && currentMillis - millisElapsedMessages > millisMessage) {
       millisElapsedMessages = currentMillis;
-      String subject      = subjectMsg("BASIS");
-      String message      = fillMessage();
-      mailSend = sendMail(subject,message);
+      String subject        = subjectMsg("BASIS");
+      String message        = fillBaseMessage();
+      mailSend              = sendMail(subject,message);
       if ( mailSend ) {
              countTilts = 0;
              countStatHeat = 0;
@@ -239,32 +223,33 @@ void sendMessage() {
 void sendInitMessage() {
   if (WiFiConnected()) {
     lcdShowInit("Sending InitMsg",2,0);     
-    String subject      = subjectMsg("INIT");
-    String message      = fillAlertMessage();
-    mailSend = sendMail(subject,message);
+    String subject          = subjectMsg("INIT");
+    String message          = fillInitMessage();
+    mailSend                = sendMail(subject,message);
     }
 }
 void sendStateMessage() {
   if (WiFiConnected()) {
-    String subject      = subjectMsg("STATUS");
-    String message      =  fillStateMessage();
-    mailSend = sendMail(subject,message);
+    String subject          = subjectMsg("STATUS");
+    String message          = fillStateMessage();
+    mailSend                = sendMail(subject,message);
     }
 }
 void sendAlertMessage() {
+  // gebruik een countdownteller 'alertMaxTimer'
+  // om te vermijden dat alert constant blijft komen
   --alertMaxTimer;
   if ( alertMaxTimer < 1) {
     if (WiFiConnected()) {
-      alertMaxTimer=alertCountDown;
-      String subject      = subjectMsg("ALERT");
-      String message      = fillAlertMessage();
-      mailSend = sendMail(subject,message);
+      alertMaxTimer         = alertCountDown;
+      String subject        = subjectMsg("ALERT");
+      String message        = fillAlertMessage();
+      mailSend              = sendMail(subject,message);
       }
   }
 }
 String subjectMsg(String mType) {
-  mType = mType + " Gist Controller " + versie + " Doel:" + targetTempW + "°C";
-  return mType;
+  return mType + " Gist Controller " + versie + " Doel:" + targetTempW + "°C";
 }
 
 ICACHE_RAM_ATTR void potTurned() {
@@ -273,9 +258,9 @@ ICACHE_RAM_ATTR void potTurned() {
 
   // reset de tijd in deze LCD-status
   // anders bestaat de kans dat je naar hoofdscherm springt tijdens draaien
-  millisLCDStart = millis();
-  backlightStart = millis();
-  buttonAction=BUTTON_NONE;
+  millisLCDStart  = millis();
+  backlightStart  = millis();
+  buttonAction    = BUTTON_NONE;
   
   int bturn;
   bturn = rotary.read();
@@ -302,6 +287,7 @@ ICACHE_RAM_ATTR void potTurned() {
   // test of je niet te ver gaat tov NO_OF_LCD_STATES
   currentLCDState += NO_OF_LCD_STATES;
   currentLCDState %= NO_OF_LCD_STATES;
+  // toon het nieuwe scherm
   displayState();
 }
 
@@ -313,8 +299,9 @@ ICACHE_RAM_ATTR void potPushed() {
   // anders bestaat de kans dat je naar hoofdscherm springt tijdens duwen
   millisLCDStart = millis();
   backlightStart = millis();
-  
-  if ( !isBacklightActive ) {       // zet backlight terug aan
+
+  // als backlight uit staat, zet het aan + stop
+  if ( !isBacklightActive ) {
     buttonPushed = false;
     enableBacklight(millis());
     return;
@@ -335,7 +322,7 @@ ICACHE_RAM_ATTR void potPushed() {
   }
 
   switch (currentLCDState) {
-      case DISPLAY_RESET_WIFI:                 // connect Wifi
+      case DISPLAY_RESET_WIFI:                // herconnecteer Wifi
         wifiSuccess=WiFiConnect();
         break;
       case DISPLAY_RESET_EEPROM:              // reset EEPROM
@@ -343,41 +330,41 @@ ICACHE_RAM_ATTR void potPushed() {
         EEPROMReadSettings();
         if ( send_msg ) sendInitMessage();
         break;
-      case DISPLAY_RESET_NODEMCU:           // reset Nodemcu
+      case DISPLAY_RESET_NODEMCU:             // reset Nodemcu
         ESP.restart();
         break;
-      case DISPLAY_STATUS_AUTO:              // terug naar automatisch COOL/HEAT
+      case DISPLAY_STATUS_AUTO:               // terug naar automatisch COOL/HEAT
         digitalWrite(HEATING_PIN, LOW);
         digitalWrite(COOLING_PIN, LOW);    
-        currentControllerState = STATE_INACTIVE;
-        millisStateStart = millis();
-        forced=false;
+        currentControllerState  = STATE_INACTIVE;
+        millisStateStart        = millis();
+        forced                  = false;
         break;
       case DISPLAY_STATUS_HEAT:                // HEAT aan tot weer uitgezet of tempwort = gewenst
         digitalWrite(COOLING_PIN, LOW);
         digitalWrite(HEATING_PIN, HIGH);
-        currentControllerState = STATE_HEATING;
-        millisStateStart = millis();
-        forced=true;
+        currentControllerState  = STATE_HEATING;
+        millisStateStart        = millis();
+        forced                  = true;
         break;
       case DISPLAY_STATUS_COOL:                // COOL aan tot weer uitgezet of tempwort = gewenst
         digitalWrite(HEATING_PIN, LOW);
         digitalWrite(COOLING_PIN, HIGH);
-        currentControllerState = STATE_COOLING;
-        millisStateStart = millis();
-        forced=true;
+        currentControllerState  = STATE_COOLING;
+        millisStateStart        = millis();
+        forced                  = true;
         break;
     }    
 }
 
 /**
- * Gebruik knoppen, LCD-displaymodus aanpassen en LCD verversen
+ * Backlite uitzetten, display waarde SUMMARY, terug naar hoofdscherm
  */
 void controlDisplayState() {
   if (!isBacklightActive) return;
   
-  currentMillis = millis();
-  millisInLCDState = currentMillis - millisLCDStart;
+  currentMillis     = millis();
+  millisInLCDState  = currentMillis - millisLCDStart;
   
   // Zet LCD uit na verstrijken timeout (REDIRECT_TIMEOUT * 5)
   checkBacklightTimeout(currentMillis);
@@ -392,8 +379,8 @@ void controlDisplayState() {
   if ( !buttonAction && currentLCDState != DISPLAY_SUMMARY) {
     // Indien je te lang in huidige LCD-status zit = Terug naar SUMMARY-status
     if ( millisInLCDState >= REDIRECT_TIMEOUT ) {
-      millisLCDStart = currentMillis;
-      backlightStart = currentMillis;
+      millisLCDStart  = currentMillis;
+      backlightStart  = currentMillis;
       currentLCDState = DISPLAY_SUMMARY;
       displayState();
     }
@@ -403,6 +390,8 @@ void controlDisplayState() {
 
 /**
  * Zet LCD-backlight uit als timeout verstreken (REDIRECT_TIMEOUT * 5)
+ * Zet LCD uit
+ * Zet LCD aan
  */
 void checkBacklightTimeout(int mtime) {
   backlightTimeout = currentMillis - backlightStart;
@@ -410,24 +399,18 @@ void checkBacklightTimeout(int mtime) {
     disableBacklight(mtime);
   }
 }
-/**
- * disable LCDscherm
- */
 void disableBacklight(int mtime) {
   lcd.noBacklight();
   lcd.noDisplay();
   isBacklightActive = false;
 }
-/**
- * enable LCDscherm
- */
 void enableBacklight(int mtime) {
   lcd.display();
   lcd.backlight();
-  currentLCDState = DISPLAY_SUMMARY;
+  currentLCDState   = DISPLAY_SUMMARY;
   isBacklightActive = true;
-  backlightStart = mtime;
-  millisLCDStart = mtime;
+  backlightStart    = mtime;
+  millisLCDStart    = mtime;
 }
 
 /**
@@ -525,11 +508,15 @@ String initComponents() {
   }
   
   // Bewaar het startpunt
-  startDateInt = DateTime.now();
-  backlightStart = millis();
+  startDateInt          = DateTime.now();
+  backlightStart        = millis();
   millisElapsedMessages = millis();
   
   //EEPROM bewaren/ophalen waardes
+  // EEPROM bevat de herbruikbare waardes: 
+  //    Gewenste WortTemp, Tijd tussen BasisMails, TotaalTilts sinds start, Starttijd
+  // Bij herstart NODEMCU worden deze herbruikt
+  // Tenzij EEPROM_VER wordt aangepast ... of reset via menu
   byte ver;
   lcdShowInit("EEPROM",2,0);
   EEPROM.begin(512);
@@ -554,7 +541,7 @@ String initComponents() {
 boolean WiFiConnect() {
   lcdShowInit("WiFi",2,0);  
   if ( wm_reset ) {wifiManager.resetSettings();}
-  //wifiManager.setDebugOutput(false);
+  wifiManager.setDebugOutput(false);
   wifiManager.setMinimumSignalQuality(wm_quality);
   //Parameter1 = naam accesspoint  Parameter2 = paswoord
   wifiSuccess=wifiManager.autoConnect("GistController", "gistcontroller");
@@ -590,13 +577,13 @@ boolean sendMail(String subject, String message) {
   }
   else {
     error_msg = gsender->getError(); 
-    state = false;
+    state     = false;
   }
   return state;
 }
 
 /*
- * Ophalen actuele tijd
+ * Initialisatie DateTime
  */
 boolean setupDateTime(int loops) {
   int cntLoops          = 0;
@@ -917,100 +904,93 @@ String zeroPad( int value ) {
   return valueString;
 }
 
+
 /*
- * vul string met informatie om te verzenden als message
+ * BASIS-email: opvullen tekst
  * <BR> = nieuwe lijn <p> = nieuwe paragraaf
  */
-String fillMessage() {
-  String bmsg       = "";
-
-  bmsg = bmsg + WiFi.localIP().toString().c_str();
-  bmsg = bmsg + DateFormatter::format("Startpunt: %d/%m/%Y %H:%M:%S", startDateInt);
-  bmsg = bmsg + DateFormatter::format(" Meetpunt: %d/%m/%Y %H:%M:%S", DateTime.now());
-  bmsg += paragraph;
-            
-  bmsg += "Momenteel ";
-  switch ( currentControllerState ) {
-    case STATE_COOLING:
-      bmsg = bmsg + "Koelen   : ";
-      break;
-    case STATE_INACTIVE:
-      bmsg = bmsg + "Inactief : ";
-      break;
-    case STATE_HEATING:
-      bmsg = bmsg + "Verwarmen: ";
-      break;
-  }
+String fillBaseMessage() {
+  String bmsg = msgStandard();            
+  bmsg = bmsg + "Momenteel " + msgStatus();
   bmsg += paragraph;
   bmsg = bmsg + oneLineMessage("STATUS");
   return bmsg;
 }
 
 /*
- * Message bij statusupdate: cool/heat
+ * STATUS-email: opvullen tekst
  */
 String fillStateMessage() {
-  String bmsg       = "";
-
-  bmsg = bmsg + WiFi.localIP().toString().c_str();
-  bmsg = bmsg + DateFormatter::format("Startpunt: %d/%m/%Y %H:%M:%S", startDateInt);
-  bmsg = bmsg + DateFormatter::format(" Meetpunt: %d/%m/%Y %H:%M:%S", DateTime.now());
-  bmsg += paragraph;
-            
-  bmsg += "Naar ";
-  switch ( currentControllerState ) {
-    case STATE_COOLING:
-      bmsg = bmsg + "Koelen";
-      break;
-    case STATE_INACTIVE:
-      bmsg = bmsg + "Inactief";
-      break;
-    case STATE_HEATING:
-      bmsg = bmsg + "Verwarmen";
-      break;
-  }
-  bmsg = bmsg + "--> Temp Wort: " + wortTemp;
+  String bmsg = msgStandard();       
+  bmsg = bmsg + "Naar " + msgStatus();
+  bmsg = bmsg + " --> Temp Wort: " + wortTemp;
   bmsg = bmsg + " Frigo: " + frigoTemp;
   bmsg += paragraph;
 
-  bmsg = bmsg + oneLineMessage("StateCHANGE");
-  
+  bmsg = bmsg + oneLineMessage("StateCHANGE");  
   return bmsg;
 }
 
 /*
- * vul string met Alertinformatie om te verzenden
- * <BR> = nieuwe lijn <p> = nieuwe paragraaf
+ * ALERT-email: opvullen tekst
  */
 String fillAlertMessage() {  
-  String bmsg       = "";
-  bmsg = bmsg + WiFi.localIP().toString().c_str();
-  bmsg = bmsg + DateFormatter::format("Startpunt: %d/%m/%Y %H:%M:%S", startDateInt);
-  bmsg = bmsg + DateFormatter::format(" Meetpunt: %d/%m/%Y %H:%M:%S", DateTime.now());
-  bmsg += paragraph;
-            
-  bmsg += "Momenteel ";
-  switch ( currentControllerState ) {
-    case STATE_COOLING:
-      bmsg = bmsg + "Koelen   : ";
-      break;
-    case STATE_INACTIVE:
-      bmsg = bmsg + "Inactief : ";
-      break;
-    case STATE_HEATING:
-      bmsg = bmsg + "Verwarmen: ";
-      break;
-  }
+  String bmsg = msgStandard();         
+  bmsg = bmsg + "Momenteel " + msgStatus();
   bmsg = bmsg + showTime(millisInControllerState/1000,false);
   bmsg = bmsg + " Temp Wort: " + wortTemp;
   bmsg = bmsg + " Frigo: " + frigoTemp;
   bmsg += paragraph;
 
-  bmsg = bmsg + oneLineMessage("ALERT");
-  
+  bmsg = bmsg + oneLineMessage("ALERT");  
   return bmsg;
 }
 
+/*
+ * INIT-email: opvullen tekst
+ */
+String fillInitMessage() {  
+  String bmsg = msgStandard();         
+  bmsg = bmsg + "Momenteel " + msgStatus();
+  bmsg = bmsg + showTime(millisInControllerState/1000,false);
+  bmsg = bmsg + " Temp Wort: " + wortTemp;
+  bmsg = bmsg + " Frigo: " + frigoTemp;
+  bmsg += paragraph;
+  return bmsg;
+}
+
+/*
+ * Eerste standaardlijnen voor emails
+ */
+String msgStandard() {
+  String base = "";
+  base = base + WiFi.localIP().toString().c_str();
+  base = base + DateFormatter::format("Startpunt: %d/%m/%Y %H:%M:%S", startDateInt);
+  base = base + DateFormatter::format(" Meetpunt: %d/%m/%Y %H:%M:%S", DateTime.now());
+  base += paragraph;
+  return base;
+}
+/*
+ * Statusinformatie voor emails
+ */
+String msgStatus() {
+  String base = "";
+  switch ( currentControllerState ) {
+    case STATE_COOLING:
+      base = "Koelen   : ";
+      break;
+    case STATE_INACTIVE:
+      base = "Inactief : ";
+      break;
+    case STATE_HEATING:
+      base = "Verwarmen: ";
+      break;
+  }
+  return base;
+}
+/*
+ * Laatste standaardlijnen voor emails: gebruikt in excel
+ */
 String oneLineMessage(String newstate ) {
   String olmsg    = "";
   olmsg = olmsg + "startdt;startuur;nowdt;nowuur;currentstatus;tijdinstatus;newstatus;doelwort;doelfrigo;worttemp;";
@@ -1021,7 +1001,8 @@ String oneLineMessage(String newstate ) {
   // meetpunt
   olmsg = olmsg + DateFormatter::format("%d/%m/%Y;", DateTime.now());
   olmsg = olmsg + DateFormatter::format("%H:%M:%S;", DateTime.now());
-  switch ( currentControllerState ) {                     // status op meetpunt
+  // status op meetpunt
+  switch ( currentControllerState ) {
     case STATE_COOLING:
       olmsg = olmsg + "Koelen;";
       break;
@@ -1034,8 +1015,8 @@ String oneLineMessage(String newstate ) {
   }                                                     // tijd in huidige status
   olmsg = olmsg + showTime(millisInControllerState/1000,false) + ";"; 
   olmsg = olmsg + newstate + ";";                       // nieuwe status
-  olmsg = olmsg + targetTempW + ";";                    // doeltemperatuur
-  olmsg = olmsg + targetTempF + ";";                    // doeltemperatuur
+  olmsg = olmsg + targetTempW + ";";                    // doeltemperatuur Wort
+  olmsg = olmsg + targetTempF + ";";                    // doeltemperatuur Frigo
   olmsg = olmsg + wortTemp + ";";                       // huidige worttemp
   olmsg = olmsg + frigoTemp + ";";                      // frigo temp
   olmsg = olmsg + countStatCool + ";";                  // coolings in timeframe
@@ -1102,20 +1083,20 @@ void EEPROMWritePresets() {   // Reset waardes in EEPROM
 
 //Webservice
 void handle_OnConnect() {
-  String lastTilted = showTime(millisBetweenTilts/1000,false);
-  String lastMessage = showTime((millis() - millisElapsedMessages)/1000,false);
+  String lastTilted       = showTime(millisBetweenTilts/1000,false);
+  String lastMessage      = showTime((millis() - millisElapsedMessages)/1000,false);
   String currentStateTime = showTime(millisInControllerState/1000,false);
-  String currentState = "";
+  String currentState     = "";
   
   switch (currentControllerState) {
     case STATE_COOLING:
-      currentState="COOL";
+      currentState="KOELEN";
       break;
     case STATE_INACTIVE:
-      currentState="INACTIVE";
+      currentState="INACTIEF";
       break;
     case STATE_HEATING:
-      currentState="HEAT";
+      currentState="VERWARMEN";
       break;
   }
   server.send(200, "text/html", SendHTML(wortTemp,frigoTemp,targetTempF,targetTempW,lastTilted,currentState,countTilts,countTiltsTotal,currentStateTime,lastMessage)); 

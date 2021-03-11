@@ -113,7 +113,7 @@ const int   BUTTON_LEFT           = 4;
 const int   STATE_COOLING         = 0;
 const int   STATE_INACTIVE        = 1;
 const int   STATE_HEATING         = 2;
-const int   STATE_DANGER          = 18000000; // stuur alert als 30min in zelfde status
+const int   STATE_DANGER          = 3600000; // stuur alert als 30min in zelfde status
 
 // LCDdisplay waardes = "DISP"
 const int   DISPLAY_SUMMARY           = 0;
@@ -138,5 +138,14 @@ const int   NO_OF_LCD_STATES          = 12;
 #define numberOfMinutes(_time_) ((_time_ / SECS_PER_MIN) % SECS_PER_MIN)
 #define numberOfHours(_time_) (( _time_% SECS_PER_DAY) / SECS_PER_HOUR)
 #define elapsedDays(_time_) ( _time_ / SECS_PER_DAY) 
+
+// Initialiseer librarys 
+LiquidCrystal_I2C lcd = LiquidCrystal_I2C(0x27, 20, 4);
+RotaryFullStep rotary(RO_LEFT, RO_RIGHT, true, 50);
+Adafruit_ADXL345_Unified tilter = Adafruit_ADXL345_Unified(12345);
+OneWire oneWire(TEMP_PIN);
+DallasTemperature sensors(&oneWire);
+WiFiManager wifiManager;
+ESP8266WebServer server(80);
 
 #endif // CONFIG
