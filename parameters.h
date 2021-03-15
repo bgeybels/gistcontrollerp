@@ -21,6 +21,7 @@ int     millisMessage             = 1800000;// Tijd tss twee messages 1000=1sec
 int     millisElapsedMessages     = 0;     // Verstreken tijd
 boolean mailSend                  = false; // true = mail verzenden gelukt
 bool    send_msg                  = true;  // true=send mails (gewoon + alert)
+String  sendStatusMsg             = "Y";   // Verstuur email voor statusaanpassing?
 int     alertMaxTimer             = 0;     // Countdown om alerts te beperken
 int     alertCountDown            = 300;   // aantal tellen voor volgende alert
 
@@ -128,7 +129,8 @@ const int   DISPLAY_RESET_NODEMCU     = 8;
 const int   DISPLAY_STATUS_AUTO       = 9;
 const int   DISPLAY_STATUS_HEAT       = 10;
 const int   DISPLAY_STATUS_COOL       = 11;
-const int   NO_OF_LCD_STATES          = 12;
+const int   DISPLAY_SEND_STATUSMSG    = 12;
+const int   NO_OF_LCD_STATES          = 13;
 
 // Omzetten millis/seconden naar leesbare vorm
 #define SECS_PER_MIN  (60UL)

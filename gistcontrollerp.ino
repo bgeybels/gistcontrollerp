@@ -117,7 +117,7 @@ void controlState() {
         if (millisInControllerState > maxTimeCooling) maxTimeCooling = millisInControllerState;
         millisStateStart        = currentMillis;
         digitalWrite(COOLING_PIN, LOW);
-        if ( send_msg ) sendStateMessage();          // Stuur STATUS-email
+        if ( send_msg && sendStatusMsg == "Y" ) sendStateMessage();          // Stuur STATUS-email
       } else {
         // Alert-message als er iets grondig fout loopt
         if ( send_msg && millisInControllerState > STATE_DANGER ) sendAlertMessage();
@@ -132,7 +132,7 @@ void controlState() {
         countStatHeat++;
         countStatHeatTotal++;
         digitalWrite(HEATING_PIN, HIGH);
-        if ( send_msg ) sendStateMessage();       // Stuur STATUS-email
+        if ( send_msg && sendStatusMsg == "Y" ) sendStateMessage();       // Stuur STATUS-email
       }
       else if (( frigoTemp > ( targetTempF + Deadband ) ) 
            && ((unsigned long)((millis() - stopTime) / 1000) > coolMinOff)) {
@@ -142,7 +142,7 @@ void controlState() {
         countStatCool++;
         countStatCoolTotal++;
         digitalWrite(COOLING_PIN, HIGH);
-        if ( send_msg ) sendStateMessage();       // Stuur STATUS-email
+        if ( send_msg && sendStatusMsg == "Y" ) sendStateMessage();       // Stuur STATUS-email
       }
       break;
     // Momenteel aan het VERWARMEN
@@ -154,7 +154,7 @@ void controlState() {
         if (millisInControllerState > maxTimeHeating) maxTimeHeating = millisInControllerState;
         millisStateStart          = currentMillis;
         digitalWrite(HEATING_PIN, LOW);
-        if ( send_msg ) sendStateMessage();       // Stuur STATUS-email
+        if ( send_msg && sendStatusMsg == "Y" ) sendStateMessage();       // Stuur STATUS-email
       } else {
         // Alert-message als er iets grondig fout loopt
         if ( send_msg && millisInControllerState > STATE_DANGER ) sendAlertMessage();
@@ -320,6 +320,12 @@ ICACHE_RAM_ATTR void potPushed() {
       displaytargetTempWData();
       return;
   }
+  else if ( currentLCDState == DISPLAY_SEND_STATUSMSG) {
+      if ( buttonPushed ) EEPROMWriteSettings();
+      buttonPushed = !buttonPushed;
+      displaysendstatusmsgData();
+      return;
+  }
 
   switch (currentLCDState) {
       case DISPLAY_RESET_WIFI:                // herconnecteer Wifi
@@ -445,6 +451,14 @@ void handleUpDown( int buttonAction, int mtime ) {
           break; 
       }
       displaytargetTempWData();
+      break;
+    case DISPLAY_SEND_STATUSMSG:              // Verstuur msg bij statusupdate
+      if ( sendStatusMsg == "Y") {
+        sendStatusMsg = "N";
+      } else {
+        sendStatusMsg = "Y";
+      }
+      displaysendstatusmsgData();
       break;
   }
 }
@@ -679,6 +693,9 @@ void displayState() {
     case DISPLAY_STATUS_COOL:
       displaystatus_cool();
       break;
+    case DISPLAY_SEND_STATUSMSG:
+      displaysendstatusmsg();
+      break;
     default:
       // Opvangen fout in schermdefinities
       lcd.clear();
@@ -784,7 +801,7 @@ void displayIP() {
 }
 
 /* 
- *  SET-schermen targetTemp, msgtime
+ *  SET-schermen targetTemp, msgtime en sendstatusmessage
  */
 void displaytargetTempW() {
   lcd.clear();
@@ -819,6 +836,25 @@ void displaysetmsgtime() {
 void displaysetmsgtimeData() {
   lcd.setCursor(0,1);
   lcd.print(millisMessage/60000);
+  if ( buttonPushed ) {
+    lcd.setCursor(18,1);
+    lcd.print(F("<>"));
+  } else {lcd.print(F("  "));}
+}
+void displaysendstatusmsg() {
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print(F("Stuur StatusMail?: "));
+  lcd.setCursor(0,1);
+  lcd.print(sendStatusMsg);
+  lcd.setCursor(7,1);
+  lcd.print(F("[up/down]"));
+  lcd.setCursor(18,1);
+  lcd.print(F("  "));
+}
+void displaysendstatusmsgData() {
+  lcd.setCursor(0,1);
+  lcd.print(sendStatusMsg);
   if ( buttonPushed ) {
     lcd.setCursor(18,1);
     lcd.print(F("<>"));
@@ -1057,7 +1093,8 @@ void EEPROMReadSettings() {  // Lees waardes uit EEPROM
   EEPROM.get(10, targetTempW);
   EEPROM.get(20, millisMessage);
   EEPROM.get(30, countTiltsTotal);
-  EEPROM.get(40, startDateInt);
+  EEPROM.get(40, sendStatusMsg);
+  EEPROM.get(50, startDateInt);
 }
 void EEPROMWriteSettings() {  // Bewaar waardes in EEPROM
   byte temp = EEPROM_VER;
@@ -1065,7 +1102,8 @@ void EEPROMWriteSettings() {  // Bewaar waardes in EEPROM
   EEPROM.put(10, targetTempW);
   EEPROM.put(20, millisMessage);
   EEPROM.put(30, countTiltsTotal);
-  EEPROM.put(40, startDateInt);
+  EEPROM.put(40, sendStatusMsg);
+  EEPROM.put(50, startDateInt);
   EEPROM.commit();
 }
 void EEPROMWritePresets() {   // Reset waardes in EEPROM
@@ -1077,7 +1115,8 @@ void EEPROMWritePresets() {   // Reset waardes in EEPROM
   EEPROM.put(10, presettemp);     // targetTempW
   EEPROM.put(20, 3600000);        // millisMessage
   EEPROM.put(30, 0);              // totaal tilts
-  EEPROM.put(40, startDateInt);   // startdate
+  EEPROM.put(40, "Y");            // stuur statusemails
+  EEPROM.put(50, startDateInt);   // startdate
   EEPROM.commit();
 }
 
