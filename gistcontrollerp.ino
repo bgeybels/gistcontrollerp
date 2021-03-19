@@ -2,7 +2,6 @@
  * GIP Jobbe Geybels 2020-2021
  * Gistcontroller v6.x op een NODEMCU-board (ESP8266)
  *    P-Controle: Simpele Proportionele Controle
- * 
  * WifiSetup      via WiFiManager (On Demand via IPscherm+select)
  * I2C-ADXL345    Gyroscoop
  * I2C-LCD        LCD
@@ -1024,6 +1023,7 @@ String msgStatus() {
   }
   return base;
 }
+
 /*
  * Laatste standaardlijnen voor emails: gebruikt in excel
  */
