@@ -21,7 +21,7 @@ int     millisMessage             = 1800000;// Tijd tss twee messages 1000=1sec
 int     millisElapsedMessages     = 0;     // Verstreken tijd
 boolean mailSend                  = false; // true = mail verzenden gelukt
 bool    send_msg                  = true;  // true=send mails (gewoon + alert)
-String  sendStatusMsg             = "Y";   // Verstuur email voor statusaanpassing?
+char    sendStatusMsg             = "N";   // Verstuur email voor statusaanpassing?
 int     alertMaxTimer             = 0;     // Countdown om alerts te beperken
 int     alertCountDown            = 300;   // aantal tellen voor volgende alert
 

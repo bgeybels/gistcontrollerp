@@ -816,10 +816,9 @@ void displaytargetTempW() {
 void displaytargetTempWData() {
   lcd.setCursor(0,1);
   lcd.print(targetTempW);
-  if ( buttonPushed ) {
-    lcd.setCursor(18,1);
-    lcd.print(F("<>"));
-  } else {lcd.print(F("  "));}
+  lcd.setCursor(18,1);
+  if ( buttonPushed ) {lcd.print(F("<>"));}
+  else {lcd.print(F("  "));}
 }
 void displaysetmsgtime() {
   lcd.clear();
@@ -835,10 +834,9 @@ void displaysetmsgtime() {
 void displaysetmsgtimeData() {
   lcd.setCursor(0,1);
   lcd.print(millisMessage/60000);
-  if ( buttonPushed ) {
-    lcd.setCursor(18,1);
-    lcd.print(F("<>"));
-  } else {lcd.print(F("  "));}
+  lcd.setCursor(18,1);
+  if ( buttonPushed ) {lcd.print(F("<>"));}
+  else {lcd.print(F("  "));}
 }
 void displaysendstatusmsg() {
   lcd.clear();
@@ -854,10 +852,9 @@ void displaysendstatusmsg() {
 void displaysendstatusmsgData() {
   lcd.setCursor(0,1);
   lcd.print(sendStatusMsg);
-  if ( buttonPushed ) {
-    lcd.setCursor(18,1);
-    lcd.print(F("<>"));
-  } else {lcd.print(F("  "));}
+  lcd.setCursor(18,1);
+  if ( buttonPushed ) {lcd.print(F("<>"));}
+  else {lcd.print(F("  "));}
 }
 
 /**
@@ -1108,6 +1105,7 @@ void EEPROMWriteSettings() {  // Bewaar waardes in EEPROM
 }
 void EEPROMWritePresets() {   // Reset waardes in EEPROM
   startDateInt = DateTime.now();
+  sendStatusMsg = "N";
   byte temp = EEPROM_VER;
   // double=8 int=4 byte=1 bool=1 startDateInt
   EEPROM.put(0, temp);            // update EEPROM version
@@ -1115,7 +1113,7 @@ void EEPROMWritePresets() {   // Reset waardes in EEPROM
   EEPROM.put(10, presettemp);     // targetTempW
   EEPROM.put(20, 3600000);        // millisMessage
   EEPROM.put(30, 0);              // totaal tilts
-  EEPROM.put(40, "Y");            // stuur statusemails
+  EEPROM.put(40, "N");            // stuur statusemails
   EEPROM.put(50, startDateInt);   // startdate
   EEPROM.commit();
 }
